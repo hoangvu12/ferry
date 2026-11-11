@@ -253,6 +253,7 @@ fn lint_strictness_never_fails_a_base() {
     );
 }
 
+#[cfg(unix)]
 /// A repository with the default configuration whose `cargo clippy` fails
 /// the way it does where clippy is not installed. Keep the directory alive
 /// as long as the repository.
@@ -272,6 +273,7 @@ fn repo_without_clippy() -> (tempfile::TempDir, TestRepo) {
     (bin, repo)
 }
 
+#[cfg(unix)]
 /// A toolchain without clippy still gets a base, warmed without it.
 #[test]
 fn missing_clippy_is_skipped() {
@@ -290,6 +292,7 @@ fn missing_clippy_is_skipped() {
     );
 }
 
+#[cfg(unix)]
 /// Skipping clippy must not leave a base that warms nothing, which config
 /// validation rejects for the same reason.
 #[test]
@@ -338,6 +341,7 @@ fn doctor_notes_unremapped_clippy_only_where_remapping_applies() {
     }
 }
 
+#[cfg(unix)]
 /// Without a working toolchain, doctor reports that, not a missing clippy.
 #[test]
 fn doctor_skips_the_clippy_check_without_a_toolchain() {

@@ -176,6 +176,7 @@ fn failed_spawn_does_not_remove_another_agents_worktree() {
         "#!/bin/sh\n[ \"$1\" = committed ] && grep -q 'refs/heads/ferry/a$' && sleep 3\nexit 0\n",
     )
     .unwrap();
+    #[cfg(unix)]
     fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let shared: PathBuf = repo.scratch().join("shared");
 

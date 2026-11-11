@@ -121,6 +121,7 @@ fn a_differing_file_is_newer_than_the_base_whatever_checkout_left() {
         &hook,
         "#!/bin/sh\ngit ls-files -z | xargs -0 touch -h -d 2024-06-01T00:00:00\n",
     );
+    #[cfg(unix)]
     fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     repo.base();
 

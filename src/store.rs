@@ -244,7 +244,13 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
 
 /// Platform cache directory for Ferry: `$XDG_CACHE_HOME/ferry` or
 /// `~/.cache/ferry` on Linux, `~/Library/Caches/ferry` on macOS.
+///
+/// On Windows `%LOCALAPPDATA%\ferry`, whatever the shell: Git Bash sets
+/// `HOME` and PowerShell does not, and both must find the same store.
 pub fn default_store_parent() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return local_app_data().map(|d| d.join("ferry"));
+    }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute());
@@ -261,7 +267,12 @@ pub fn default_store_parent() -> Option<PathBuf> {
 /// Platform data directory for agent worktrees:
 /// `$XDG_DATA_HOME/ferry/worktrees` or `~/.local/share/ferry/worktrees` on
 /// Linux, `~/Library/Application Support/ferry/worktrees` on macOS.
+///
+/// On Windows `%LOCALAPPDATA%\ferry\worktrees`, which Windows never purges.
 pub fn default_worktree_parent() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return local_app_data().map(|d| d.join("ferry").join("worktrees"));
+    }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute());
@@ -273,6 +284,13 @@ pub fn default_worktree_parent() -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
         .or_else(|| home.map(|h| h.join(".local/share")))
         .map(|d| d.join("ferry/worktrees"))
+}
+
+/// `%LOCALAPPDATA%`, if it is set to an absolute path.
+fn local_app_data() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
 }
 
 /// A validated agent name. It becomes a directory name and part of a git

@@ -856,7 +856,7 @@ mod tests {
         /// it can stage symlinks or raw index entries.
         fn with(files: &[(&str, &str)], prepare: impl FnOnce(&Self)) -> Self {
             let tmp = tempfile::tempdir().unwrap();
-            let root = crate::sys::canonicalize(tmp.path()).unwrap();
+            let root = sys::canonicalize(tmp.path()).unwrap();
             let fx = Self {
                 repo: root.join("repo"),
                 base: root.join("base"),
@@ -886,6 +886,7 @@ mod tests {
             fx
         }
 
+        #[cfg(unix)]
         fn outside(&self) -> PathBuf {
             self.repo.parent().unwrap().to_path_buf()
         }

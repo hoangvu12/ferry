@@ -68,7 +68,8 @@ fn configured_target_and_build_dirs_cannot_redirect_builds() {
     let redirected = repo.scratch().join("redirected");
     let config = format!(
         "[build]\ntarget-dir = \"{0}/target\"\nbuild-dir = \"{0}/build/{{workspace-path-hash}}\"\n",
-        redirected.display()
+        // TOML basic strings treat `\` as an escape.
+        redirected.display().to_string().replace('\\', "/")
     );
     fs::create_dir(repo.root().join(".cargo")).unwrap();
     repo.write(&repo.root().join(".cargo/config.toml"), &config);
@@ -137,17 +138,27 @@ fn without_a_sandbox_generated_code_sees_the_agents_paths() {
 #[test]
 fn cargo_configs_that_ferry_builds_miss_are_reported() {
     let repo = TestRepo::new();
-    let above = repo.scratch().join(".cargo/config.toml");
+    let above = repo.scratch().join(".cargo").join("config.toml");
     fs::create_dir_all(above.parent().unwrap()).unwrap();
     repo.write(&above, "[build]\njobs = 2\n");
-    let untracked = repo.root().join(".cargo/config.toml");
+    let untracked = repo.root().join(".cargo").join("config.toml");
     fs::create_dir_all(untracked.parent().unwrap()).unwrap();
     repo.write(&untracked, "[build]\njobs = 2\n");
 
     let built = repo.ferry_json(["base"]);
-    let warnings = built["warnings"].to_string();
+    // The strings themselves: JSON escapes the backslashes of Windows paths.
+    let warnings: Vec<&str> = built["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w.as_str())
+        .collect();
     for config in [&above, &untracked] {
-        assert!(warnings.contains(config.to_str().unwrap()), "{built}");
+        let config = config
+            .to_str()
+            .unwrap()
+            .replace('/', std::path::MAIN_SEPARATOR_STR);
+        assert!(warnings.iter().any(|w| w.contains(&config)), "{built}");
     }
 
     repo.commit_all("track the repository's cargo config");

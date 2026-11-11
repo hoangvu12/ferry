@@ -142,8 +142,12 @@ pub fn exclude_from_backups(path: &Path) -> std::io::Result<()> {
 
 /// Tries a copy-on-write clone between two scratch files in `dir`, using the
 /// same call the reflink backend uses.
-#[cfg_attr(windows, allow(dead_code))]
 pub fn probe_reflink(dir: &Path) -> Probe {
+    if cfg!(windows) {
+        return Probe::Unsupported {
+            reason: "copy-on-write clones are not implemented on Windows yet".into(),
+        };
+    }
     let scratch = dir.join(format!(".ferry-reflink-probe-{}", std::process::id()));
     let result = (|| {
         std::fs::create_dir_all(&scratch).map_err(|e| ("create scratch dir", e))?;

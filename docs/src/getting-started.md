@@ -8,7 +8,7 @@ Linux (btrfs), with paths shortened.
 
 ## Requirements
 
-- Linux or macOS. Windows is not supported.
+- Linux, macOS, or Windows 10/11 (see [Platform support](platforms.md#windows)).
 - `git` 2.20 or newer.
 - Rust installed with [rustup](https://rustup.rs). Ferry runs whatever `cargo`
   and `rustc` your repository selects, including `rust-toolchain.toml`.

@@ -100,6 +100,15 @@ fn rm_refuses_while_a_process_runs_as_the_agent_on_any_backend() {
     assert!(refused.stderr.contains("still in use"), "{refused}");
     assert!(worktree.is_dir());
 
+    // On Windows `ferry run` waits for its child rather than exec'ing it, and
+    // killing ferry alone would leave `sleep` running, as the job object
+    // rightly reports: end the whole tree.
+    #[cfg(windows)]
+    std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &sleeper.id().to_string()])
+        .output()
+        .unwrap();
+    #[cfg(unix)]
     sleeper.kill().unwrap();
     sleeper.wait().unwrap();
     assert!(

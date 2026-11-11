@@ -511,6 +511,18 @@ fn parse_entries(out: &[u8], index: bool) -> std::result::Result<Vec<Entry>, Str
 }
 
 fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    // Git for Windows prints absolute paths as `C:/...`; give them the
+    // native separators so they read like every other path Ferry prints.
+    if cfg!(windows)
+        && let [drive, b':', b'/', ..] = bytes
+        && drive.is_ascii_alphabetic()
+    {
+        let native: Vec<u8> = bytes
+            .iter()
+            .map(|&b| if b == b'/' { b'\\' } else { b })
+            .collect();
+        return PathBuf::from(OsString::from_vec(native));
+    }
     PathBuf::from(OsString::from_vec(bytes.to_vec()))
 }
 
@@ -524,6 +536,11 @@ where
     S: AsRef<OsStr>,
 {
     let mut cmd = Command::new("git");
+    // Bases and agents live deep in the store: Git for Windows needs this
+    // for paths past 260 characters, which Windows itself allows.
+    if cfg!(windows) {
+        cmd.args(["-c", "core.longpaths=true"]);
+    }
     cmd.arg("-C")
         .arg(dir)
         .args(args)

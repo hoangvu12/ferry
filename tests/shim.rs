@@ -34,7 +34,11 @@ fn shim_runs_plain_cargo_outside_agent_worktrees() {
     repo.spawn("a");
 
     Build::run(repo.shimmed_cargo(repo.root()).arg("build")).assert_rebuilt(ALL_PACKAGES);
-    assert!(repo.root().join("target/debug/app").is_file());
+    assert!(
+        repo.root()
+            .join(format!("target/debug/app{}", std::env::consts::EXE_SUFFIX))
+            .is_file()
+    );
 
     let outside = repo.scratch().join("not-a-repo");
     std::fs::create_dir(&outside).unwrap();

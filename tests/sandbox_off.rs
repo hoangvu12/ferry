@@ -492,8 +492,8 @@ fn out_dir_data_naming_the_profile_dir_is_rerun() {
     let profile = field(&app_output(&repo, "a"), "profile");
     // In remap mode the path goes through the worktree's `.ferry-target`.
     assert_eq!(
-        fs::canonicalize(&profile).unwrap(),
-        fs::canonicalize(repo.agent_target("a").join("debug")).unwrap()
+        ferry::sys::canonicalize(&profile).unwrap(),
+        ferry::sys::canonicalize(repo.agent_target("a").join("debug")).unwrap()
     );
     repo.build("a").assert_rebuilt(&[]);
 }

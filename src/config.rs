@@ -465,7 +465,7 @@ fn parse_bool_env(
 
 fn expand_dir(dir: &Path, repo_root: &Path) -> PathBuf {
     if let Ok(rest) = dir.strip_prefix("~")
-        && let Some(home) = std::env::var_os("HOME")
+        && let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
     {
         return PathBuf::from(home).join(rest);
     }
@@ -578,12 +578,13 @@ prune = true
 branch-prefix = "ferry/"
 # Where agent worktrees (and their uncommitted work) live, one subdirectory per repository.
 # Default: $XDG_DATA_HOME/ferry/worktrees or ~/.local/share/ferry/worktrees (Linux),
-# ~/Library/Application Support/ferry/worktrees (macOS).
+# ~/Library/Application Support/ferry/worktrees (macOS), %LOCALAPPDATA%\ferry\worktrees (Windows).
 # worktree-dir = "~/agents"
 
 [store]
 # Parent directory for Ferry's per-repository build state (bases, forks).
-# Default: $XDG_CACHE_HOME/ferry or ~/.cache/ferry (Linux), ~/Library/Caches/ferry (macOS).
+# Default: $XDG_CACHE_HOME/ferry or ~/.cache/ferry (Linux), ~/Library/Caches/ferry (macOS),
+# %LOCALAPPDATA%\ferry (Windows).
 # dir = "/fast/disk/ferry"
 
 [fork]

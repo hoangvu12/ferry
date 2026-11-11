@@ -11,7 +11,13 @@ fn main() {
     let entries: Vec<String> = files
         .iter()
         .map(|path| {
-            let name = path.strip_prefix("assets").unwrap().display();
+            // `/` on every platform, so the tests expect one spelling.
+            let name = path
+                .strip_prefix("assets")
+                .unwrap()
+                .display()
+                .to_string()
+                .replace('\\', "/");
             let contents = fs::read_to_string(path).unwrap();
             format!("{name}={}", contents.trim())
         })

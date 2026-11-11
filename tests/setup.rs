@@ -4,6 +4,7 @@
 //! job).
 
 // The helper below is test code too; failing loudly is its job.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used)]
 
 mod common;

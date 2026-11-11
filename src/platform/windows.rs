@@ -15,12 +15,12 @@ pub fn detect(store_root: &Path) -> Capabilities {
         reason: "Windows has no mount namespaces".into(),
     };
     let store_fs = fs_info(store_root);
-    let reflink = Probe::Unsupported {
-        reason: if store_fs.name == "refs" {
-            "ReFS block cloning is not implemented yet".into()
-        } else {
-            format!("{} has no copy-on-write clones", store_fs.name)
-        },
+    let reflink = if store_fs.name == "refs" {
+        super::probe_reflink(store_root)
+    } else {
+        Probe::Unsupported {
+            reason: format!("{} has no copy-on-write clones", store_fs.name),
+        }
     };
     Capabilities {
         os: Os::Windows,

@@ -131,8 +131,8 @@ that one command.
 
 ## Windows?
 
-Not supported. Ferry relies on Unix filesystem and namespace features, and it
-does not compile on Windows.
+Yes, as on macOS: agents build at their own paths and forks are full
+copies. See [Platform support](platforms.md#windows).
 
 ## What are Ferry's limitations?
 

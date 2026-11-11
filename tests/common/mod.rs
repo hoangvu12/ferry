@@ -14,8 +14,8 @@ use std::fmt;
 use std::fs;
 use std::hash::{DefaultHasher, Hasher};
 use std::io::Write as _;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+
+use ferry::sys::{self, OsStrExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
@@ -116,7 +116,7 @@ impl TestRepo {
             .prefix("ferry-test-")
             .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
             .unwrap();
-        let scratch = fs::canonicalize(tmp.path()).unwrap();
+        let scratch = sys::canonicalize(tmp.path()).unwrap();
         let root = scratch.join("repo");
         populate(&root);
         let gitconfig = scratch.join("gitconfig");
@@ -427,7 +427,8 @@ pub fn tick(dir: &Path) {
 pub fn is_stamped(path: &Path) -> bool {
     let meta =
         fs::symlink_metadata(path).unwrap_or_else(|e| panic!("stat {}: {e}", path.display()));
-    u64::try_from(meta.mtime()) == Ok(ferry::freshness::STAMP_SECS) && meta.mtime_nsec() == 0
+    let (secs, nsec) = sys::mtime(&meta);
+    u64::try_from(secs) == Ok(ferry::freshness::STAMP_SECS) && nsec == 0
 }
 
 #[track_caller]
@@ -657,11 +658,23 @@ pub struct Snapshot(BTreeMap<PathBuf, Node>);
 struct Node {
     kind: &'static str,
     mode: u32,
-    ino: u64,
+    id: sys::FileId,
     nlink: u64,
     mtime: (i64, i64),
     len: u64,
     content: u64,
+}
+
+/// Permission bits: the mode on Unix, the attributes on Windows.
+fn mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::MetadataExt::mode(meta)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::MetadataExt::file_attributes(meta)
+    }
 }
 
 impl Snapshot {
@@ -685,12 +698,13 @@ impl Snapshot {
             } else {
                 ("file", hash(&fs::read(&path).unwrap()))
             };
+            let stat = sys::stat(&path, &meta).unwrap();
             let node = Node {
                 kind,
-                mode: meta.mode(),
-                ino: meta.ino(),
-                nlink: meta.nlink(),
-                mtime: (meta.mtime(), meta.mtime_nsec()),
+                mode: mode(&meta),
+                id: stat.id,
+                nlink: stat.nlink,
+                mtime: stat.mtime,
                 len: meta.len(),
                 content,
             };

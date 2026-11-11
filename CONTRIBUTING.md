@@ -12,7 +12,7 @@ MIT and Apache-2.0, like the rest of the project, and that you follow the
 
 ## Development setup
 
-Ferry builds on Linux and macOS (not Windows). You need:
+Ferry builds on Linux, macOS and Windows. You need:
 
 - [rustup](https://rustup.rs). The repository does not pin a toolchain; CI
   uses current stable, the MSRV and nightly:

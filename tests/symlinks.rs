@@ -8,6 +8,7 @@
 
 // clippy's allow-unwrap-in-tests covers only #[test] functions, not their
 // helpers.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used)]
 
 mod common;

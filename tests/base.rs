@@ -461,7 +461,10 @@ fn a_refresh_across_a_cargo_incremental_change_is_pruned() {
 
 /// Two builds of one binary with different features are both fresh in a
 /// refresh and both uplifted to target/debug/app; pruning must tell them
-/// apart (on Linux by the hard link Cargo made) and keep both.
+/// apart (on Linux by the hard link Cargo made) and keep both. Not on Windows:
+/// with MSVC, Cargo names binaries without a hash, so the variants share
+/// `deps/app.exe` and Cargo itself relinks when switching between them.
+#[cfg(not(windows))]
 #[test]
 fn fresh_variants_of_one_binary_survive_pruning() {
     let repo = TestRepo::with_env(&[(

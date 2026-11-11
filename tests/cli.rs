@@ -29,11 +29,16 @@ fn json_output_of_list_env_and_doctor() {
     assert_eq!(env["branch"], "ferry/a", "{env}");
     assert_eq!(env["run_prefix"], json!(["ferry", "run", "a", "--"]));
     assert!(env["build_target_dir"].is_string(), "{env}");
-    assert!(path_of(&env["shim_dir"]).join("cargo").exists(), "{env}");
+    assert!(
+        path_of(&env["shim_dir"])
+            .join(format!("cargo{}", std::env::consts::EXE_SUFFIX))
+            .exists(),
+        "{env}"
+    );
 
     // A target dir in the exported environment would leak into sub-agents
     // that work in other worktrees.
-    let exports = repo.ferry(["env", "a"]).ok();
+    let exports = repo.ferry(["env", "a", "--shell", "sh"]).ok();
     assert!(
         exports.stdout.contains("export FERRY_WORKTREE="),
         "{exports}"

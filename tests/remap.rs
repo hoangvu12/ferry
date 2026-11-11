@@ -8,6 +8,7 @@
 //! Those objects stay linked outside the target until they are counted, so
 //! no new object can be given one of their inode numbers.
 
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::panic,

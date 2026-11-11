@@ -82,7 +82,7 @@ fn relocated_units_rebuild_and_see_the_new_paths() {
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = ferry::sys::canonicalize(tmp.path()).unwrap();
     // Laid out as Ferry lays out a base and an agent.
     let store = root.join("store/repo-0123456789abcdef");
     let base = store.join("bases/a");

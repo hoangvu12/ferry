@@ -30,10 +30,7 @@ edits are incremental either way.
 | Ubuntu 24.04 and later, default policy | reflink, copy | none | crate-level reuse |
 | Docker, default seccomp profile | reflink, copy | none | crate-level reuse |
 | macOS (APFS) | reflink (`clonefile`), copy | none | crate-level reuse; experimental remap-paths mode |
-| Windows | not supported | | |
-
-Ferry does not build on Windows: compiling it there stops with a
-`compile_error!` saying so.
+| Windows 10 and 11 (NTFS) | copy | none | crate-level reuse |
 
 ## Linux
 
@@ -122,6 +119,48 @@ Bases and forks live in `~/Library/Caches/ferry`; Ferry excludes base target
 dirs and agent build state from Time Machine backups. Agent worktrees live in
 `~/Library/Application Support/ferry/worktrees`, because macOS may purge
 caches.
+
+## Windows
+
+Windows works like macOS without clones: no mount namespaces, so agents
+build at their own paths with a [relocation plan](architecture.md), and
+forks are full copies (a 4 GB target copies in about 8 s on NVMe). What
+differs from Unix:
+
+- **The shim is a hard link.** `bin\cargo.exe` (and `bin\ferry-rustc.exe`)
+  are hard links to `ferry.exe`, or copies when the store is on another
+  volume, because symlinks need Developer Mode or admin rights. A marker
+  file in the bin dir keeps Ferry from taking its own `cargo.exe` for the
+  real one.
+- **No `exec`.** Ferry starts cargo (or `ferry run`'s command) as a child,
+  waits for it and exits with its code; Ctrl+C reaches the child through
+  the console.
+- **Busy agents are tracked with a job object.** `ferry run`, `ferry shell`
+  and the shim put their process tree in a per-agent job object, whose
+  inheritable handle keeps it findable while any descendant runs, so `rm`,
+  `list` and `gc` see processes that outlive the one holding `busy.lock`,
+  and name their pids.
+- **Builds run at below-normal priority.** Agent and base cargo processes
+  start `BELOW_NORMAL_PRIORITY_CLASS`, which rustc and the linker inherit,
+  so several agents building at once leave the desktop responsive. Set
+  `FERRY_BUILD_PRIORITY=normal` to turn it off.
+- **Relocation reads every separator spelling.** Windows records paths with
+  `\`, `\\` (JSON, Debug output) or `/`; relocation folds them all to `/`
+  before matching, and MSVC binaries, which Cargo names without a hash,
+  are matched by name.
+- **Warm commands** made only of words and quotes, as the generated ones
+  are, run directly; others run with `sh` from Git for Windows when it is
+  on `PATH`, else with `cmd /C`.
+- **`ferry env`** prints PowerShell (`ferry env a1 | Invoke-Expression`)
+  outside Git Bash and `sh` inside it (`--shell` picks one). The Claude Code
+  `SessionStart` hook writes the Git Bash form, which Claude Code's Bash
+  tool uses on Windows.
+- **Long paths.** Ferry passes `core.longpaths=true` to the git commands it
+  runs. Turn on `LongPathsEnabled` in Windows, or keep `FERRY_HOME` short.
+
+Not yet on Windows: copy-on-write clones (ReFS block cloning on a Dev Drive)
+and the experimental remap-paths mode. The store and worktrees default to
+`%LOCALAPPDATA%\ferry` (worktrees in `%LOCALAPPDATA%\ferry\worktrees`), whichever shell runs Ferry.
 
 ## What `ferry doctor` reports
 

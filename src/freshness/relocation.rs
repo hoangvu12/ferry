@@ -922,8 +922,9 @@ impl Inventory {
 
     /// Up to Cargo 1.99: fingerprints in .fingerprint/<pkg>-<H>/, rustc's
     /// <crate>-<H>.d next to the outputs in deps/, examples/ or (build
-    /// scripts) build/<pkg>-<H>/. Path-source cdylibs and dylibs get no
-    /// hash, so their deps/<crate>.d is matched by lib name instead.
+    /// scripts) build/<pkg>-<H>/. Path-source cdylibs and dylibs, and
+    /// binaries on Windows MSVC, get no hash, so their deps/<crate>.d is
+    /// matched by target name instead.
     fn old_layout(&mut self, target: &Path, profile: &Path, build: &[OsString]) {
         let dir = target.join(profile);
         let Ok(fingerprints) = entries(&dir.join(".fingerprint")) else {
@@ -945,9 +946,11 @@ impl Inventory {
                     continue;
                 };
                 match stem.iter().rposition(|&b| b == b'-') {
-                    Some(dash) => by_hash.entry(stem[dash + 1..].to_vec()),
-                    None if d == deps => unhashed.entry(stem.to_vec()),
-                    None => continue,
+                    Some(dash) if is_unit_hash(&stem[dash + 1..]) => {
+                        by_hash.entry(stem[dash + 1..].to_vec())
+                    }
+                    _ if d == deps => unhashed.entry(stem.to_vec()),
+                    _ => continue,
                 }
                 .or_default()
                 .push(d.join(&file));
@@ -991,8 +994,18 @@ impl Inventory {
                 } else {
                     let mut dep_info = by_hash.get(hash).cloned().unwrap_or_default();
                     for file in &files {
-                        if let Some(lib) = file.as_bytes().strip_prefix(b"dep-lib-")
-                            && let Some(found) = unhashed.get(lib)
+                        // Windows MSVC binaries get no hash either: deps/<bin>.d.
+                        let name = file.as_bytes();
+                        if let Some(lib) = name
+                            .strip_prefix(b"dep-lib-")
+                            .or_else(|| name.strip_prefix(b"dep-bin-"))
+                            && let Some(found) = unhashed.get(lib).or_else(|| {
+                                let crate_name: Vec<u8> = lib
+                                    .iter()
+                                    .map(|&b| if b == b'-' { b'_' } else { b })
+                                    .collect();
+                                unhashed.get(&crate_name)
+                            })
                         {
                             dep_info.extend(found.iter().cloned());
                         }
