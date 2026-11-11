@@ -116,9 +116,10 @@ pub fn claude_session_start(stdin: &mut dyn Read) -> Result<()> {
         return Ok(());
     }
     let shim_dir = crate::shim::ensure()?;
+    // Claude Code sources the file in its Bash tool, Git Bash on Windows.
     let line = format!(
         "export PATH={}:\"$PATH\"\n",
-        crate::config::shell_quote(&shim_dir.to_string_lossy())
+        crate::config::sh_path(&shim_dir)
     );
     let mut file = std::fs::OpenOptions::new()
         .append(true)

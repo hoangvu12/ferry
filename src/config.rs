@@ -490,6 +490,22 @@ pub fn shell_quote(arg: &str) -> String {
     }
 }
 
+/// `dir` quoted for a `PATH` entry in `sh`. On Windows that `sh` is Git
+/// Bash, whose `PATH` holds MSYS paths (`/c/Users/...`): a drive path is
+/// rewritten to one, since its `:` would split the entry.
+pub fn sh_path(dir: &Path) -> String {
+    let text = dir.to_string_lossy();
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    if cfg!(windows)
+        && let [drive, b':', rest @ ..] = text.as_bytes()
+        && drive.is_ascii_alphabetic()
+    {
+        let rest = String::from_utf8_lossy(rest).replace('\\', "/");
+        return shell_quote(&format!("/{}{rest}", drive.to_ascii_lowercase() as char));
+    }
+    shell_quote(text)
+}
+
 /// Splits `line` into words as `sh` would, if it is only words: whitespace
 /// separates them, single quotes and double quotes group, and a backslash
 /// escapes the next character outside single quotes. `None` for anything

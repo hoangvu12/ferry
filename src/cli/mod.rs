@@ -115,6 +115,11 @@ pub enum Command {
         /// Agent name (default: the agent whose worktree contains the current
         /// directory).
         name: Option<String>,
+        /// Shell syntax to print: `sh` (`eval "$(ferry env a1)"`, also Git
+        /// Bash) or `powershell` (`ferry env a1 | Invoke-Expression`).
+        /// Default: `sh`, except on Windows outside Git Bash.
+        #[arg(long, value_enum)]
+        shell: Option<EnvShell>,
     },
 
     /// List bases and agents with their status and disk usage.
@@ -287,13 +292,19 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Shell { name } => {
             let ctx = discover()?;
             let meta = resolve_agent(&ctx, name.as_deref(), &cwd)?;
-            let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
+            let shell = std::env::var_os("SHELL").unwrap_or_else(|| {
+                if cfg!(windows) {
+                    "powershell".into()
+                } else {
+                    "/bin/sh".into()
+                }
+            });
             match agent::exec_session(&ctx, &meta, &[shell], &cwd)? {}
         }
-        Command::Env { name } => {
+        Command::Env { name, shell } => {
             let ctx = discover()?;
             let meta = resolve_agent(&ctx, name.as_deref(), &cwd)?;
-            env(&ctx, &meta, json)
+            env(&ctx, &meta, shell.unwrap_or_else(EnvShell::detect), json)
         }
         Command::List => list(&discover()?, json),
         Command::Rm { name, force } => rm(&discover()?, &name, force, json),
@@ -508,7 +519,25 @@ fn spawn(ctx: &Context, name: &str, opts: SpawnOptions, json: bool) -> anyhow::R
     Ok(ExitCode::SUCCESS)
 }
 
-fn env(ctx: &Context, meta: &AgentMeta, json: bool) -> anyhow::Result<ExitCode> {
+/// The syntax `ferry env` prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum EnvShell {
+    Sh,
+    Powershell,
+}
+
+impl EnvShell {
+    /// `sh`, except on Windows outside Git Bash (which sets `MSYSTEM`).
+    fn detect() -> Self {
+        if cfg!(windows) && std::env::var_os("MSYSTEM").is_none() {
+            EnvShell::Powershell
+        } else {
+            EnvShell::Sh
+        }
+    }
+}
+
+fn env(ctx: &Context, meta: &AgentMeta, shell: EnvShell, json: bool) -> anyhow::Result<ExitCode> {
     let report = agent::env_report(ctx, meta)?;
     if json {
         output::json(&report)?;
@@ -517,9 +546,24 @@ fn env(ctx: &Context, meta: &AgentMeta, json: bool) -> anyhow::Result<ExitCode> 
     // Deliberately no CARGO_TARGET_DIR: agent tools copy their environment
     // into sub-agents working in other worktrees, so an exported target dir
     // would make them share build state. The shim resolves it per call.
-    let q = |p: &std::path::Path| config::shell_quote(&p.to_string_lossy());
-    println!("export FERRY_WORKTREE={}", q(&report.worktree));
-    println!("export PATH={}:\"$PATH\"", q(&report.shim_dir));
+    match shell {
+        EnvShell::Sh => {
+            let q = |p: &std::path::Path| config::shell_quote(&p.to_string_lossy());
+            println!("export FERRY_WORKTREE={}", q(&report.worktree));
+            println!(
+                "export PATH={}:\"$PATH\"",
+                config::sh_path(&report.shim_dir)
+            );
+        }
+        EnvShell::Powershell => {
+            let q = |p: &std::path::Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
+            println!("$env:FERRY_WORKTREE = {}", q(&report.worktree));
+            println!(
+                "$env:PATH = {} + [IO.Path]::PathSeparator + $env:PATH",
+                q(&report.shim_dir)
+            );
+        }
+    }
     println!(
         "# cargo in {} now builds in agent {}'s sandbox; other commands: ferry run {} -- <command>",
         report.worktree.display(),
