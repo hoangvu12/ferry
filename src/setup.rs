@@ -732,7 +732,7 @@ pub fn first_on_path(name: impl AsRef<OsStr>) -> Option<PathBuf> {
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::platform::{FsInfo, Sysctl};
@@ -1012,6 +1012,7 @@ mod tests {
         assert!(!holds_binary(&copy, Path::new(SELF_EXE)));
     }
 
+    #[cfg(unix)]
     /// `AppArmor` attaches by the resolved path, so a profile for a symlink
     /// never attaches: root has to replace the link with the file.
     #[test]
@@ -1051,6 +1052,7 @@ mod tests {
         assert!(p.warnings[0].contains("every upgrade"), "{:?}", p.warnings);
     }
 
+    #[cfg(unix)]
     #[test]
     fn plan_refuses_user_writable_bin_dir_and_suggests_flag() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1163,6 +1165,7 @@ mod tests {
         assert_eq!(plan(decide(&f)).warnings, Vec::<String>::new());
     }
 
+    #[cfg(unix)]
     #[test]
     fn scripts_are_valid_sh() {
         for script in [ROOT_SCRIPT, UNINSTALL_SCRIPT] {
@@ -1174,6 +1177,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn sudo_argv_carries_paths_as_arguments_and_n_only_when_non_interactive() {
         for script in [ROOT_SCRIPT, UNINSTALL_SCRIPT] {

@@ -760,14 +760,19 @@ mod tests {
 
     #[test]
     fn store_dir_resolution() {
-        let root = Path::new("/repo");
-        let env = |k: &str| (k == "FERRY_HOME").then(|| "/custom".to_string());
+        let root = Path::new(if cfg!(windows) { r"C:\repo" } else { "/repo" });
+        let custom = if cfg!(windows) {
+            r"C:\custom"
+        } else {
+            "/custom"
+        };
+        let env = |k: &str| (k == "FERRY_HOME").then(|| custom.to_string());
         let s = Config::default().resolve(root, None, &env).unwrap();
-        assert_eq!(s.store_parent, Some(PathBuf::from("/custom")));
+        assert_eq!(s.store_parent, Some(PathBuf::from(custom)));
 
         let config = Config::parse("[store]\ndir = \".ferry-store\"\n").unwrap();
         let s = config.resolve(root, None, &no_env).unwrap();
-        assert_eq!(s.store_parent, Some(PathBuf::from("/repo/.ferry-store")));
+        assert_eq!(s.store_parent, Some(root.join(".ferry-store")));
 
         let rel = |k: &str| (k == "FERRY_HOME").then(|| "relative".to_string());
         assert!(Config::default().resolve(root, None, &rel).is_err());

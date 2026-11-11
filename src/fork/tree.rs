@@ -254,7 +254,7 @@ mod tests {
             .unwrap();
 
         let stats = clone_tree(&src, &dst, copy_file).unwrap();
-        assert_eq!(stats.files, if cfg!(unix) { 4 } else { 3 });
+        assert_eq!(stats.files, 4);
 
         assert_eq!(
             fs::read(dst.join("debug/.fingerprint/a-1/lib-a")).unwrap(),

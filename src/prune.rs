@@ -945,7 +945,13 @@ mod tests {
                     let mut paths: Vec<String> = used
                         .unused
                         .iter()
-                        .map(|p| p.strip_prefix(&self.target).unwrap().display().to_string())
+                        .map(|p| {
+                            p.strip_prefix(&self.target)
+                                .unwrap()
+                                .display()
+                                .to_string()
+                                .replace(std::path::MAIN_SEPARATOR, "/")
+                        })
                         .collect();
                     paths.sort();
                     Ok(paths)
@@ -1167,6 +1173,7 @@ mod tests {
         assert_eq!(t.unused_after(&[leaf(&t)], true).unwrap(), [failed]);
     }
 
+    #[cfg(unix)]
     /// A directory the warm commands left unreadable (a test's mode-000
     /// scratch dir under `target/tmp`, say) may hide a profile dir, so Ferry
     /// cannot tell what is in the target; that is no reason to fail the base.

@@ -509,6 +509,7 @@ fn fail(name: &'static str, detail: String, fix: Option<String>) -> Check {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn apparmor_profile_is_stacked_and_names_the_binary() {
         let p = apparmor_profile(Path::new("/usr/local/bin/ferry"));
@@ -541,6 +542,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn user_writable_ancestor_finds_the_nearest() {
         let dir = tempfile::tempdir().unwrap();

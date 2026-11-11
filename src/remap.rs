@@ -403,6 +403,7 @@ mod tests {
         assert!(allowed(true, Some("other")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn rewrites_paths_under_cwd_and_target_link() {
         let dir = tempfile::tempdir().unwrap();
@@ -483,6 +484,7 @@ mod tests {
         assert!(status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn prepare_links_target_and_hides_it_from_git() {
         let dir = tempfile::tempdir().unwrap();

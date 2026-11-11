@@ -828,6 +828,7 @@ pub(crate) fn is_real_dir(path: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::{Command, Stdio};
     use std::time::Duration;
@@ -855,7 +856,7 @@ mod tests {
         /// it can stage symlinks or raw index entries.
         fn with(files: &[(&str, &str)], prepare: impl FnOnce(&Self)) -> Self {
             let tmp = tempfile::tempdir().unwrap();
-            let root = tmp.path().canonicalize().unwrap();
+            let root = crate::sys::canonicalize(tmp.path()).unwrap();
             let fx = Self {
                 repo: root.join("repo"),
                 base: root.join("base"),
@@ -950,7 +951,7 @@ mod tests {
 
     fn mtime(path: &Path) -> (i64, i64) {
         let meta = fs::symlink_metadata(path).unwrap();
-        (meta.mtime(), meta.mtime_nsec())
+        sys::mtime(&meta)
     }
 
     fn names<'a>(paths: impl Iterator<Item = &'a Path>) -> Vec<String> {
@@ -1019,20 +1020,13 @@ mod tests {
             "src/bin",
         ] {
             let meta = fs::symlink_metadata(under(&fx.agent, Path::new(rel))).unwrap();
-            assert_eq!(
-                (meta.mtime(), meta.mtime_nsec()),
-                STAMPED,
-                "mtime of {rel:?}"
-            );
-            assert_eq!(
-                (meta.atime(), meta.atime_nsec()),
-                STAMPED,
-                "atime of {rel:?}"
-            );
+            assert_eq!(sys::mtime(&meta), STAMPED, "mtime of {rel:?}");
+            assert_eq!(sys::atime(&meta), STAMPED, "atime of {rel:?}");
         }
         assert_ne!(mtime(&fx.base.join("src/lib.rs")), STAMPED);
     }
 
+    #[cfg(unix)]
     #[test]
     fn files_that_differ_from_the_base_are_skipped() {
         let big = "x".repeat(3 * CHUNK + 17);
@@ -1123,6 +1117,7 @@ mod tests {
         assert_ne!(mtime(&fx.agent.join("a.rs")), STAMPED);
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinks_and_gitlinks_are_never_stamped_or_followed() {
         let fx = Fixture::with(&[("src/lib.rs", "x\n"), ("vendor/README", "v\n")], |fx| {
@@ -1161,6 +1156,7 @@ mod tests {
         assert_eq!(mtime(&agent.join("vendor")), STAMPED);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_directory_replaced_by_a_symlink_is_not_followed() {
         let fx = Fixture::new(&[("src/lib.rs", "x\n"), ("top.rs", "t\n")]);
@@ -1188,12 +1184,14 @@ mod tests {
         assert_eq!(mtime(&fx.agent.join("top.rs")), STAMPED);
     }
 
+    #[cfg(unix)]
     /// Replaces the file or symlink `at` with a symlink to `target`.
     fn relink(target: &str, at: &Path) {
         fs::remove_file(at).unwrap();
         symlink(target, at).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn files_reached_through_a_changed_symlink_are_not_stamped() {
         let files = [
@@ -1261,6 +1259,7 @@ mod tests {
         assert_eq!(mtime(&agent.join("e.txt")), STAMPED);
     }
 
+    #[cfg(unix)]
     #[test]
     fn everything_reached_through_a_retargeted_directory_symlink_is_not_stamped() {
         let files = [
@@ -1312,6 +1311,7 @@ mod tests {
         assert_eq!(names(plan.dirs()), ["", "rel"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_leading_out_of_a_retargeted_directory_unstamps_everything() {
         let files = [
@@ -1345,6 +1345,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_directory_replaced_by_a_symlink_into_the_tree_leaves_its_target_unstamped() {
         let fx = Fixture::new(&[
@@ -1391,6 +1392,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_fifo_is_skipped_without_blocking() {
         let fx = Fixture::new(&[("pipe", "p\n"), ("ok.rs", "o\n")]);
@@ -1463,6 +1465,7 @@ mod tests {
         assert_eq!(restored_mtime, original);
     }
 
+    #[cfg(unix)]
     /// Sets the atime and mtime of `path` itself, even of a symlink.
     fn set_secs(path: &Path, secs: i64) {
         let time = Timespec {
@@ -1472,6 +1475,7 @@ mod tests {
         set_times(path, time).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn skipped_paths_are_made_at_least_as_new_as_asked() {
         // As a hook restoring commit times leaves them.
@@ -1634,6 +1638,7 @@ mod tests {
         assert_eq!((report.dirs, report.dirs_stamped), (21, 21));
     }
 
+    #[cfg(unix)]
     #[test]
     fn base_checkout_stamps_tracked_files_and_their_directories() {
         let files = [

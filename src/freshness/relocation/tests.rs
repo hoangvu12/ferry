@@ -1,7 +1,8 @@
+use crate::sys::OsStringExt;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
-use std::os::unix::ffi::OsStringExt;
+#[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -127,7 +128,7 @@ struct Synth {
 impl Synth {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let root = crate::sys::canonicalize(tmp.path()).unwrap();
         Self::at(tmp, root.clone(), root.join("store/repo-0123456789abcdef"))
     }
 
@@ -166,7 +167,7 @@ impl Synth {
             .plan(live)
             .remove
             .iter()
-            .flat_map(|r| r.paths.iter().map(|p| p.display().to_string()))
+            .flat_map(|r| r.paths.iter().map(|p| slashed(p)))
             .collect();
         paths.sort();
         paths
@@ -238,6 +239,11 @@ impl Synth {
             writeln!(d, "{}:", input.replace(' ', "\\ ")).unwrap();
         }
         for (key, value) in env {
+            // Escaped as rustc does: Windows paths hold backslashes.
+            let value = value
+                .replace('\\', "\\\\")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r");
             write!(d, "\n# env-dep:{key}={value}").unwrap();
         }
         d.push('\n');
@@ -299,6 +305,11 @@ fn run_removal(unit: U) -> Vec<String> {
     }
 }
 
+/// `path` with `/` separators, as the expectations spell them.
+fn slashed(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 fn sorted(mut paths: Vec<String>) -> Vec<String> {
     paths.sort();
     paths
@@ -351,8 +362,14 @@ fn an_untouched_target_needs_no_removals() {
 #[test]
 fn roots_are_found_in_every_spelling() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    let store = root.join("a \"é\" b/repo-0123456789abcdef");
+    let root = crate::sys::canonicalize(tmp.path()).unwrap();
+    // Windows file names cannot hold `"`.
+    let name = if cfg!(windows) {
+        "a 'é' b"
+    } else {
+        "a \"é\" b"
+    };
+    let store = root.join(name).join("repo-0123456789abcdef");
     let s = Synth::at(tmp, root, store);
     let file = format!("{}/x/lib.rs", s.src());
     let json = serde_json::to_string(&file).unwrap();
@@ -417,7 +434,7 @@ fn every_path_of_the_store_is_classified() {
 #[test]
 fn a_root_without_a_long_plain_suffix_clears_the_target() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = crate::sys::canonicalize(tmp.path()).unwrap();
     let s = Synth::at(tmp, root.clone(), root.join("é/repo"));
     s.member(U::new("leaf", "1111111111111111", 1), &[]);
     let plan = s.plan(true);
@@ -503,6 +520,7 @@ fn profiles_are_found_at_any_depth() {
     assert_eq!(s.removed(true), sorted(expected));
 }
 
+#[cfg(unix)]
 #[test]
 fn unreadable_dirs_below_the_target_are_removed() {
     let s = Synth::new();
@@ -515,6 +533,7 @@ fn unreadable_dirs_below_the_target_are_removed() {
     assert_eq!(removed, ["tmp/locked"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn unreadable_package_dirs_of_the_new_layout_are_removed() {
     let s = Synth::new();
@@ -619,8 +638,8 @@ fn cargo_records_naming_old_paths_flag_their_unit() {
     s.put(
         &format!("{}/{RUN}.json", git.fingerprint_dir()),
         format!(
-            r#"{{"deps":[],"local":[{{"RerunIfChanged":{{"output":"o","paths":["{}/HEAD"]}}}}]}}"#,
-            s.git_dir.display()
+            r#"{{"deps":[],"local":[{{"RerunIfChanged":{{"output":"o","paths":[{}]}}}}]}}"#,
+            serde_json::to_string(&format!("{}/HEAD", s.git_dir.display())).unwrap()
         ),
     );
     let ws = U::new("wsrel", "2222222222222222", 2);
@@ -849,12 +868,13 @@ fn link_arguments_may_only_name_live_out_dirs() {
     assert_eq!(s.removed(false), sorted(linked));
 }
 
+#[cfg(unix)]
 /// Cargo replaces the exact `root-output` string, not another spelling of
 /// the same directory.
 #[test]
 fn only_the_recorded_spelling_of_an_out_dir_is_rewritten() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = crate::sys::canonicalize(tmp.path()).unwrap();
     // Through a link to a name with a space, the canonical spelling's needle
     // is a suffix of the given one's, which is dropped.
     fs::create_dir_all(root.join("My Ferry/repo-0123456789abcdef")).unwrap();
@@ -878,6 +898,7 @@ fn only_the_recorded_spelling_of_an_out_dir_is_rewritten() {
     assert_eq!(s.removed(false), sorted(run_removal(canonical)));
 }
 
+#[cfg(unix)]
 #[test]
 fn out_dir_contents_may_only_name_live_out_dirs() {
     let s = Synth::new();
@@ -1425,6 +1446,7 @@ fn applying_removes_whole_runs_and_compile_fingerprints_only() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn applying_never_follows_a_symlinked_ancestor() {
     let s = Synth::new();
@@ -1447,6 +1469,7 @@ fn applying_never_follows_a_symlinked_ancestor() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn symlinks_in_the_target_are_never_followed() {
     let s = Synth::new();
@@ -1506,10 +1529,11 @@ fn unhashed_cdylib_dep_info_is_found_by_lib_name() {
     assert_eq!(s.removed(true), ["debug/.fingerprint/cdy-1111111111111111"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn canonical_and_given_spellings_of_the_store_are_both_found() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = crate::sys::canonicalize(tmp.path()).unwrap();
     fs::create_dir_all(root.join("real/repo-0123456789abcdef")).unwrap();
     symlink(root.join("real"), root.join("alias")).unwrap();
     let s = Synth::at(tmp, root.clone(), root.join("alias/repo-0123456789abcdef"));
@@ -1561,6 +1585,7 @@ fn plans_are_cached_only_when_they_fit() {
     assert!(!uncacheable.cacheable());
 }
 
+#[cfg(unix)]
 /// An agent checkout at `<root>/agent`. It and the base's both hold
 /// `files`, and each of `links` (path, base target, agent target) is a
 /// symlink in both.
@@ -1581,6 +1606,7 @@ fn agent_checkout(s: &Synth, files: &[&str], links: &[(&str, &str, &str)]) -> Pa
     agent
 }
 
+#[cfg(unix)]
 fn link_rebuilt(s: &Synth, origin: &Origin, agent: &Path) -> Vec<String> {
     link_rebuilds(&s.target, origin, agent)
         .unwrap()
@@ -1589,6 +1615,7 @@ fn link_rebuilt(s: &Synth, origin: &Origin, agent: &Path) -> Vec<String> {
         .collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn units_reading_through_a_retargeted_symlink_rebuild() {
     let s = Synth::new();
@@ -1636,6 +1663,7 @@ fn units_reading_through_a_retargeted_symlink_rebuild() {
     assert_eq!(link_rebuilt(&s, &s.origin(false), &agent), sorted(expected));
 }
 
+#[cfg(unix)]
 #[test]
 fn invalidated_dep_info_is_emptied_in_the_writable_dir() {
     let s = Synth::new();
@@ -1662,6 +1690,7 @@ fn invalidated_dep_info_is_emptied_in_the_writable_dir() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn inputs_of_a_nested_workspace_resolve_from_its_root() {
     let s = Synth::new();
@@ -1692,6 +1721,7 @@ fn inputs_of_a_nested_workspace_resolve_from_its_root() {
     assert_eq!(link_rebuilt(&s, &s.origin(false), &agent), sorted(expected));
 }
 
+#[cfg(unix)]
 #[test]
 fn absolute_inputs_resolve_below_the_checkout_rustc_saw() {
     let s = Synth::new();
@@ -1753,7 +1783,7 @@ impl Moved {
             return None;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let root = crate::sys::canonicalize(tmp.path()).unwrap();
         let store = root.join("store/repo-0123456789abcdef");
         let base = store.join("bases/a");
         let base_src = base.join("src");

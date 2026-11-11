@@ -710,6 +710,7 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn same_dir_resolves_symlinks() {
         let dir = tempfile::tempdir().unwrap();
