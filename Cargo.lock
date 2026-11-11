@@ -118,6 +118,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -147,6 +153,7 @@ dependencies = [
  "anstyle",
  "anyhow",
  "clap",
+ "dunce",
  "libc",
  "memchr",
  "rustix",
@@ -155,6 +162,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "windows-sys",
 ]
 
 [[package]]

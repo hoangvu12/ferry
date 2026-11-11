@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,6 +10,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::{Error, IoContext, Result};
+use crate::sys;
 
 pub fn now_unix() -> u64 {
     SystemTime::now()
@@ -63,8 +63,9 @@ pub fn disk_usage(path: &Path) -> Result<u64> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e).at("stat", &dir),
         };
-        if seen.insert((meta.dev(), meta.ino())) {
-            total += meta.blocks() * 512;
+        let id = sys::stat(&dir, &meta).at("stat", &dir)?.id;
+        if seen.insert(id) {
+            total += sys::allocated(&meta);
         }
         if !meta.is_dir() {
             continue;
@@ -79,7 +80,9 @@ pub fn disk_usage(path: &Path) -> Result<u64> {
 
 /// `remove_dir_all` that also handles directories without write or search
 /// permission. overlayfs leaves a mode-000 `work/work` directory behind, and
-/// a plain recursive delete fails on it with EACCES.
+/// a plain recursive delete fails on it with EACCES. On Windows, read-only
+/// files (git's objects, for one) cannot be deleted until the attribute is
+/// cleared.
 pub fn remove_dir_all_force(path: &Path) -> Result<()> {
     match fs::remove_dir_all(path) {
         Ok(()) => return Ok(()),
@@ -113,13 +116,25 @@ fn make_dirs_writable(path: &Path) -> Result<()> {
         let Ok(meta) = fs::symlink_metadata(&dir) else {
             continue;
         };
+        #[cfg(windows)]
+        if meta.permissions().readonly() && !meta.is_symlink() {
+            let mut perms = meta.permissions();
+            // Clears the read-only attribute: no Unix mode bits are involved.
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            fs::set_permissions(&dir, perms).at("make writable", &dir)?;
+        }
         if !meta.is_dir() {
             continue;
         }
-        let mode = meta.permissions().mode();
-        if mode & 0o700 != 0o700 {
-            fs::set_permissions(&dir, fs::Permissions::from_mode(mode | 0o700))
-                .at("chmod", &dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode();
+            if mode & 0o700 != 0o700 {
+                fs::set_permissions(&dir, fs::Permissions::from_mode(mode | 0o700))
+                    .at("chmod", &dir)?;
+            }
         }
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
@@ -136,12 +151,14 @@ fn make_dirs_writable(path: &Path) -> Result<()> {
 /// Store and worktree directories hold copies of the source and build
 /// output; another user who could write there could also swap what a build
 /// or agent runs.
+///
+/// On Windows the directory inherits its parent's ACL (the user profile's
+/// `AppData\Local` by default, private to the user), and only its kind is
+/// checked.
 pub fn private_dir(dir: &Path) -> Result<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
     match fs::symlink_metadata(dir) {
         Ok(meta) => {
-            let me = rustix::process::getuid().as_raw();
-            if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o022 != 0 {
+            if !meta.is_dir() || !owned_by_me(&meta) {
                 return Err(Error::Refused(format!(
                     "{} must be a directory owned by you and not writable by others",
                     dir.display()
@@ -152,7 +169,11 @@ pub fn private_dir(dir: &Path) -> Result<PathBuf> {
             if let Some(parent) = dir.parent() {
                 fs::create_dir_all(parent).at("create directory", parent)?;
             }
-            match fs::DirBuilder::new().mode(0o700).create(dir) {
+            #[cfg_attr(windows, allow(unused_mut))]
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            match builder.create(dir) {
                 Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
                     return Err(e).at("create directory", dir);
                 }
@@ -162,6 +183,17 @@ pub fn private_dir(dir: &Path) -> Result<PathBuf> {
         Err(e) => return Err(e).at("stat", dir),
     }
     Ok(dir.to_path_buf())
+}
+
+#[cfg(unix)]
+fn owned_by_me(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.uid() == rustix::process::getuid().as_raw() && meta.mode() & 0o022 == 0
+}
+
+#[cfg(windows)]
+fn owned_by_me(_: &fs::Metadata) -> bool {
+    true
 }
 
 /// Prints `ferry: <message>` to stderr. Unlike `eprintln!`, it does not
@@ -209,7 +241,17 @@ mod tests {
         let locked = root.join("work/work");
         fs::create_dir_all(&locked).unwrap();
         fs::write(locked.join("f"), b"x").unwrap();
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut perms = fs::metadata(locked.join("f")).unwrap().permissions();
+            perms.set_readonly(true);
+            fs::set_permissions(locked.join("f"), perms).unwrap();
+        }
         remove_dir_all_force(&root).unwrap();
         assert!(!root.exists());
     }

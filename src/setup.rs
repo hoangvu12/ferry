@@ -139,7 +139,11 @@ impl Facts {
             .filter(|copy| *copy != exe && !same_bytes(copy, Path::new(SELF_EXE)));
         let mut facts = Facts {
             os: caps.os,
+            #[cfg(unix)]
             euid: rustix::process::geteuid().as_raw(),
+            // Never root: AppArmor setup does not apply on Windows anyway.
+            #[cfg(windows)]
+            euid: u32::MAX,
             initial_userns: std::fs::read_to_string("/proc/self/uid_map")
                 .is_ok_and(|map| map.split_whitespace().eq(["0", "0", "4294967295"])),
             container: container_marker(),
@@ -318,10 +322,10 @@ fn lossy(path: &Path) -> String {
 
 /// What `ferry setup apparmor` should do on the machine `f` describes.
 pub fn decide(f: &Facts) -> Decision<InstallPlan> {
-    if f.os == Os::Macos {
+    if f.os != Os::Linux {
         return stop(
             Outcome::NotApplicable,
-            "macOS has no AppArmor or user namespaces",
+            "only Linux has AppArmor and user namespaces",
         );
     }
     if f.euid == 0 {
@@ -487,10 +491,10 @@ fn install_plan(f: &Facts, parser: &Path) -> Decision<InstallPlan> {
 
 /// What `ferry setup apparmor --uninstall` should do.
 pub fn decide_uninstall(f: &Facts) -> Decision<UninstallPlan> {
-    if f.os == Os::Macos {
+    if f.os != Os::Linux {
         return stop(
             Outcome::NotApplicable,
-            "macOS has no AppArmor or user namespaces",
+            "only Linux has AppArmor and user namespaces",
         );
     }
     if f.euid == 0 {

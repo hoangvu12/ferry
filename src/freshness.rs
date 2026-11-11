@@ -42,18 +42,16 @@ use std::ffi::OsString;
 use std::fs::{self, File, Metadata};
 use std::io::{self, ErrorKind, Read};
 use std::num::NonZero;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rustix::fs::{AtFlags, CWD, Mode, OFlags, Timespec, Timestamps};
-use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 
 use crate::config::FreshnessPref;
 use crate::error::{Error, IoContext, Result};
 use crate::git::Entry;
+use crate::sys;
 use crate::toolchain::Toolchain;
 
 mod relocation;
@@ -68,10 +66,7 @@ pub use relocation::{
 /// deterministic across bases and agents.
 pub const STAMP_SECS: u64 = 1_700_000_000;
 
-const STAMP: Timespec = Timespec {
-    tv_sec: STAMP_SECS.cast_signed(),
-    tv_nsec: 0,
-};
+const STAMP: (i64, i64) = (STAMP_SECS.cast_signed(), 0);
 
 /// Bytes compared per read when checking a file against the base.
 const CHUNK: usize = 64 * 1024;
@@ -139,22 +134,29 @@ struct Verified {
 /// writer can restore `mtime` (as stamping itself does) but not `ctime`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Observed {
-    dev: u64,
-    ino: u64,
+    id: sys::FileId,
     len: u64,
     mtime: (i64, i64),
     ctime: (i64, i64),
 }
 
 impl Observed {
-    fn of(meta: &Metadata) -> Self {
+    fn from(stat: sys::Stat) -> Self {
         Self {
-            dev: meta.dev(),
-            ino: meta.ino(),
-            len: meta.len(),
-            mtime: (meta.mtime(), meta.mtime_nsec()),
-            ctime: (meta.ctime(), meta.ctime_nsec()),
+            id: stat.id,
+            len: stat.len,
+            mtime: stat.mtime,
+            ctime: stat.ctime,
         }
+    }
+
+    /// `path` itself, whose `symlink_metadata` is `meta`.
+    fn at(path: &Path, meta: &Metadata) -> Result<Self> {
+        sys::stat(path, meta).map(Self::from).at("stat", path)
+    }
+
+    fn of_file(file: &File, meta: &Metadata, path: &Path) -> Result<Self> {
+        sys::stat_file(file, meta).map(Self::from).at("stat", path)
     }
 }
 
@@ -223,8 +225,8 @@ pub fn plan(
     agent_index: &[Entry],
     agent_root: &Path,
 ) -> Result<StampPlan> {
-    let root = fs::canonicalize(agent_root).at("resolve", agent_root)?;
-    let base_root = fs::canonicalize(base_src).at("resolve", base_src)?;
+    let root = sys::canonicalize(agent_root).at("resolve", agent_root)?;
+    let base_root = sys::canonicalize(base_src).at("resolve", base_src)?;
     let base: HashMap<&Path, &Entry> = base_tree.iter().map(|e| (e.path.as_path(), e)).collect();
 
     // `None` marks a path with an entry at a non-zero merge stage.
@@ -354,10 +356,10 @@ pub fn freshen_skipped(plan: &StampPlan, at_least: SystemTime) -> Result<usize> 
     let Ok(since_epoch) = at_least.duration_since(UNIX_EPOCH) else {
         return Ok(0);
     };
-    let time = Timespec {
-        tv_sec: i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX),
-        tv_nsec: since_epoch.subsec_nanos().into(),
-    };
+    let time = (
+        i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX),
+        i64::from(since_epoch.subsec_nanos()),
+    );
     let mut freshened = 0;
     for (rel, reason) in plan.skipped.iter().chain(&plan.skipped_dirs) {
         if matches!(reason, SkipReason::NotRegularFile | SkipReason::Missing) {
@@ -390,7 +392,7 @@ pub fn freshen_skipped(plan: &StampPlan, at_least: SystemTime) -> Result<usize> 
 /// requires that no other threads exist. Returns the number of files and
 /// directories stamped.
 pub(crate) fn stamp_base_checkout(base_src: &Path, index: &[Entry]) -> Result<usize> {
-    let root = fs::canonicalize(base_src).at("resolve", base_src)?;
+    let root = sys::canonicalize(base_src).at("resolve", base_src)?;
     for entry in index {
         check_relative(&entry.path)?;
     }
@@ -526,7 +528,7 @@ struct LinkEnd {
 impl LinkEnd {
     fn of(root: &Path, rel: &Path) -> Self {
         let path = root.join(rel);
-        let target = fs::canonicalize(&path)
+        let target = sys::canonicalize(&path)
             .ok()
             .and_then(|t| t.strip_prefix(root).ok().map(Path::to_path_buf));
         Self {
@@ -638,7 +640,7 @@ fn verify_dir(
     let agent = entry_names(&under(root, dir))?;
     let base = entry_names(&under(base_root, dir))?;
     Ok(match (agent, base) {
-        (Some(agent), Some(base)) if agent == base => Ok(Observed::of(&meta)),
+        (Some(agent), Some(base)) if agent == base => Ok(Observed::at(&under(root, dir), &meta)?),
         (Some(_), Some(_)) => Err(SkipReason::ContentDiffers),
         _ => Err(SkipReason::Missing),
     })
@@ -714,7 +716,7 @@ fn verify_file(agent: &Path, base: &Path, bufs: &mut [Vec<u8>; 2]) -> Result<Ver
             return Ok(Err(SkipReason::ContentDiffers));
         }
         if n < CHUNK {
-            return Ok(Ok(Observed::of(&agent_meta)));
+            return Ok(Ok(Observed::of_file(&agent_file, &agent_meta, agent)?));
         }
     }
 }
@@ -727,14 +729,12 @@ fn read_chunk(file: &mut File, buf: &mut Vec<u8>) -> io::Result<usize> {
 /// metadata comes from the open file, so it describes the bytes compared.
 /// Non-blocking, so a FIFO cannot hang the open.
 fn open_regular(path: &Path) -> Result<Verdict<(File, Metadata)>> {
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let fd = match rustix::fs::open(path, flags, Mode::empty()) {
-        Ok(fd) => fd,
-        Err(Errno::NOENT | Errno::NOTDIR) => return Ok(Err(SkipReason::Missing)),
-        Err(Errno::LOOP) => return Ok(Err(SkipReason::NotRegularFile)),
-        Err(e) => return Err(io::Error::from(e)).at("open", path),
+    let file = match sys::open_nofollow(path) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Ok(Err(SkipReason::NotRegularFile)),
+        Err(e) if is_gone(&e) => return Ok(Err(SkipReason::Missing)),
+        Err(e) => return Err(e).at("open", path),
     };
-    let file = File::from(fd);
     let meta = file.metadata().at("stat", path)?;
     if !meta.is_file() {
         return Ok(Err(SkipReason::NotRegularFile));
@@ -746,7 +746,7 @@ fn open_regular(path: &Path) -> Result<Verdict<(File, Metadata)>> {
 fn stamp_unchanged(root: &Path, verified: &Verified) -> Result<bool> {
     let path = under(root, &verified.path);
     match fs::symlink_metadata(&path) {
-        Ok(meta) if Observed::of(&meta) == verified.seen => {}
+        Ok(meta) if Observed::at(&path, &meta)? == verified.seen => {}
         Ok(_) => return Ok(false),
         Err(e) if is_gone(&e) => return Ok(false),
         Err(e) => return Err(e).at("stat", &path),
@@ -759,14 +759,8 @@ fn set_stamp(path: &Path) -> Result<()> {
     set_times(path, STAMP)
 }
 
-fn set_times(path: &Path, time: Timespec) -> Result<()> {
-    let times = Timestamps {
-        last_access: time,
-        last_modification: time,
-    };
-    rustix::fs::utimensat(CWD, path, &times, AtFlags::SYMLINK_NOFOLLOW)
-        .map_err(io::Error::from)
-        .at("set the mtime of", path)
+fn set_times(path: &Path, time: (i64, i64)) -> Result<()> {
+    sys::set_times(path, time, time, true).at("set the mtime of", path)
 }
 
 /// Whether every directory from `root` down to the parent of `path`, a path
@@ -776,7 +770,7 @@ fn parent_is_real(root: &Path, path: &Path) -> Result<bool> {
         Some(parent) if path != root => parent,
         _ => return Ok(true),
     };
-    match fs::canonicalize(parent) {
+    match sys::canonicalize(parent) {
         Ok(canonical) => Ok(canonical == parent),
         Err(e) if is_gone(&e) => Ok(false),
         Err(e) => Err(e).at("resolve", parent),

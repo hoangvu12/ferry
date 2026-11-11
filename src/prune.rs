@@ -18,7 +18,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write as _};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -74,20 +73,21 @@ struct FileRecord {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct Stat {
-    dev: u64,
-    ino: u64,
+    id: crate::sys::FileId,
     len: u64,
     mtime: (i64, i64),
 }
 
 impl Stat {
-    fn of(meta: &fs::Metadata) -> Self {
-        Self {
-            dev: meta.dev(),
-            ino: meta.ino(),
-            len: meta.len(),
-            mtime: (meta.mtime(), meta.mtime_nsec()),
-        }
+    /// `path` itself, whose `symlink_metadata` is `meta`; `None` if it is
+    /// gone by now.
+    fn of(path: &Path, meta: &fs::Metadata) -> Option<Self> {
+        let stat = crate::sys::stat(path, meta).ok()?;
+        Some(Self {
+            id: stat.id,
+            len: stat.len,
+            mtime: stat.mtime,
+        })
     }
 }
 
@@ -179,7 +179,9 @@ impl Log {
             .chain(message.executable)
             .chain(message.out_dir)
             .filter_map(|path| {
-                let stat = fs::symlink_metadata(&path).ok().map(|m| Stat::of(&m));
+                let stat = fs::symlink_metadata(&path)
+                    .ok()
+                    .and_then(|m| Stat::of(&path, &m));
                 let path = path.strip_prefix(&self.target).ok()?.to_path_buf();
                 Some(FileRecord { path, stat })
             })
@@ -690,12 +692,11 @@ fn claim(profiles: &mut Profiles, record: &UnitRecord) -> Check<()> {
         let outputs = |unit: &Unit| -> Vec<Stat> {
             unit.outputs
                 .iter()
-                .filter_map(|p| fs::symlink_metadata(p).ok())
-                .map(|m| Stat::of(&m))
+                .filter_map(|p| Stat::of(p, &fs::symlink_metadata(p).ok()?))
                 .collect()
         };
         // Cargo hard-links uplifted files on Linux and copies them on macOS.
-        let same_inode = |s: &Stat, o: &Stat| (s.dev, s.ino) == (o.dev, o.ino);
+        let same_inode = |s: &Stat, o: &Stat| s.id == o.id;
         let same_copy = |s: &Stat, o: &Stat| (s.len, s.mtime) == (o.len, o.mtime);
         for same in [same_inode, same_copy] {
             let matching: Vec<bool> = candidates
@@ -917,9 +918,12 @@ mod tests {
                     .iter()
                     .map(|p| FileRecord {
                         path: p.into(),
-                        stat: fs::symlink_metadata(self.target.join(p))
-                            .ok()
-                            .map(|m| Stat::of(&m)),
+                        stat: {
+                            let path = self.target.join(p);
+                            fs::symlink_metadata(&path)
+                                .ok()
+                                .and_then(|m| Stat::of(&path, &m))
+                        },
                     })
                     .collect(),
             }

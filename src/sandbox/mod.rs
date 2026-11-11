@@ -146,7 +146,7 @@ impl Plan {
     /// sandbox) maps to the same relative path under [`Plan::build_src`];
     /// anything else maps to the root of the source tree.
     pub fn map_cwd(&self, cwd: &Path) -> PathBuf {
-        let resolve = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let resolve = |p: &Path| crate::sys::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let cwd = resolve(cwd);
         for root in [&self.canonical_src, &self.src] {
             if let Ok(rel) = cwd.strip_prefix(resolve(root)) {

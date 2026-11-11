@@ -1,13 +1,11 @@
-//! Advisory `flock(2)` locks on files in the store.
+//! Advisory file locks in the store: `flock(2)` on Unix, `LockFileEx` on
+//! Windows (both through std's `File::lock`).
 //!
 //! Locks guard Ferry's own metadata (agent registry, base construction,
 //! namespace join/create). They are never held while an agent's build runs.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
-
-use rustix::fs::{FlockOperation, flock};
-use rustix::io::Errno;
 
 use crate::error::{IoContext, Result};
 
@@ -16,55 +14,52 @@ pub struct FileLock {
     _file: File,
 }
 
+#[derive(Clone, Copy)]
+enum Kind {
+    Exclusive,
+    Shared,
+}
+
 impl FileLock {
     /// Blocks until the exclusive lock is acquired. `what` names the resource
     /// in the message printed while waiting.
     pub fn exclusive(path: &Path, what: &str) -> Result<Self> {
-        Self::acquire(
-            path,
-            what,
-            FlockOperation::NonBlockingLockExclusive,
-            FlockOperation::LockExclusive,
-        )
+        Self::acquire(path, what, Kind::Exclusive)
     }
 
     pub fn shared(path: &Path, what: &str) -> Result<Self> {
-        Self::acquire(
-            path,
-            what,
-            FlockOperation::NonBlockingLockShared,
-            FlockOperation::LockShared,
-        )
+        Self::acquire(path, what, Kind::Shared)
     }
 
     /// Returns `None` if another process holds the lock.
     pub fn try_exclusive(path: &Path) -> Result<Option<Self>> {
         let file = open_lock_file(path)?;
-        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        match file.try_lock() {
             Ok(()) => Ok(Some(Self { _file: file })),
-            Err(Errno::WOULDBLOCK) => Ok(None),
-            Err(e) => Err(std::io::Error::from(e)).at("lock", path),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(e)) => Err(e).at("lock", path),
         }
     }
 
-    fn acquire(
-        path: &Path,
-        what: &str,
-        try_op: FlockOperation,
-        op: FlockOperation,
-    ) -> Result<Self> {
+    fn acquire(path: &Path, what: &str, kind: Kind) -> Result<Self> {
         let file = open_lock_file(path)?;
-        match flock(&file, try_op) {
+        let attempt = match kind {
+            Kind::Exclusive => file.try_lock(),
+            Kind::Shared => file.try_lock_shared(),
+        };
+        match attempt {
             Ok(()) => {}
-            Err(Errno::WOULDBLOCK) => {
+            Err(TryLockError::WouldBlock) => {
                 crate::fsutil::note(&format!(
                     "waiting for another ferry process to release {what}"
                 ));
-                flock(&file, op)
-                    .map_err(std::io::Error::from)
-                    .at("lock", path)?;
+                match kind {
+                    Kind::Exclusive => file.lock(),
+                    Kind::Shared => file.lock_shared(),
+                }
+                .at("lock", path)?;
             }
-            Err(e) => return Err(std::io::Error::from(e)).at("lock", path),
+            Err(TryLockError::Error(e)) => return Err(e).at("lock", path),
         }
         Ok(Self { _file: file })
     }

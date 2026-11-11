@@ -13,8 +13,6 @@
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -33,6 +31,7 @@ use crate::platform::Capabilities;
 use crate::sandbox::{self, Isolation, Plan};
 use crate::shim;
 use crate::store::{AgentName, AgentPaths, BaseId};
+use crate::sys;
 
 /// Set inside every sandbox to the agent's name, for scripts and prompts.
 /// Ferry itself never reads it.
@@ -292,7 +291,7 @@ fn check_worktree_location(ctx: &Context, worktree: &Path) -> Result<()> {
 /// equal however they are spelled.
 fn resolve_lexically(path: &Path) -> PathBuf {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    if let Ok(real) = fs::canonicalize(&path) {
+    if let Ok(real) = sys::canonicalize(&path) {
         return real;
     }
     match (path.parent(), path.file_name()) {
@@ -565,17 +564,17 @@ pub fn find_by_dir(ctx: &Context, dir: &Path) -> Result<Option<AgentMeta>> {
 
 /// The agent whose worktree is exactly `root` (a worktree's top level).
 pub fn find_by_root(ctx: &Context, root: &Path) -> Result<Option<AgentMeta>> {
-    let root = fs::canonicalize(root).at("resolve", root)?;
+    let root = sys::canonicalize(root).at("resolve", root)?;
     let canonical = ctx.store.canonical_src();
     let agents = all_meta(ctx)?;
-    if fs::canonicalize(&canonical).is_ok_and(|c| c == root) {
+    if sys::canonicalize(&canonical).is_ok_and(|c| c == root) {
         return Ok(agents
             .into_iter()
             .find(|a| same_file(&canonical, &a.worktree)));
     }
     Ok(agents
         .into_iter()
-        .find(|a| fs::canonicalize(&a.worktree).is_ok_and(|w| w == root)))
+        .find(|a| sys::canonicalize(&a.worktree).is_ok_and(|w| w == root)))
 }
 
 pub fn find_by_cwd(ctx: &Context, cwd: &Path) -> Result<AgentMeta> {
@@ -849,15 +848,15 @@ pub fn exec_session(
     } else {
         meta.worktree.clone()
     };
-    let err = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .current_dir(&cwd)
         .env("PATH", shim::path_with(&shim_dir))
         .env("PWD", &cwd)
         .env(SANDBOX_ENV, meta.name.as_str())
-        .env("FERRY_WORKTREE", &meta.worktree)
-        .exec();
-    Err(exec_error(program, err))
+        .env("FERRY_WORKTREE", &meta.worktree);
+    Err(exec_error(program, sys::exec(&mut command)))
 }
 
 /// The `cargo` shim: replaces the current process with the real cargo,
@@ -887,7 +886,8 @@ pub fn exec_cargo(
         shim::keep_incremental(&mut command, &toolchain.cargo_version, args, &cwd);
     }
     shim::set_target(&mut command, workspace.target(&plan.build_target()));
-    Err(exec_error(cargo.as_os_str(), command.exec()))
+    shim::lower_priority(&mut command);
+    Err(exec_error(cargo.as_os_str(), sys::exec(&mut command)))
 }
 
 /// Enters `meta`'s sandbox unless this process is already inside it.
@@ -938,7 +938,7 @@ pub fn env_report(ctx: &Context, meta: &AgentMeta) -> Result<EnvReport> {
 }
 
 fn inside(dir: &Path, root: &Path) -> bool {
-    match (fs::canonicalize(dir), fs::canonicalize(root)) {
+    match (sys::canonicalize(dir), sys::canonicalize(root)) {
         (Ok(dir), Ok(root)) => dir.starts_with(root),
         _ => false,
     }
@@ -953,8 +953,8 @@ fn exec_error(program: &std::ffi::OsStr, source: std::io::Error) -> Error {
 
 /// True if `a` and `b` are the same directory (same device and inode).
 fn same_file(a: &Path, b: &Path) -> bool {
-    match (fs::metadata(a), fs::metadata(b)) {
-        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+    match (sys::file_id(a), sys::file_id(b)) {
+        (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
 }
@@ -966,6 +966,26 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// files close-on-exec), so the lock stays held exactly as long as any
 /// process started for the agent is alive. That lets `rm`, `list` and `gc`
 /// tell whether an agent is in use on every backend and platform.
+///
+/// Windows has no `exec` and no inheritable `flock`: this process stays the
+/// parent of what it runs (`sys::exec`) and holds the lock until it exits,
+/// and it joins the agent's job object, which every process it starts joins
+/// too, so processes that outlive it still count.
+#[cfg(windows)]
+fn hold_busy_lock(paths: &AgentPaths) -> Result<()> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&paths.busy_lock)
+        .at("open", &paths.busy_lock)?;
+    file.lock_shared().at("lock", &paths.busy_lock)?;
+    std::mem::forget(file);
+    sys::join_agent_job(&paths.busy_lock).at("join the job object of", &paths.busy_lock)
+}
+
+#[cfg(unix)]
 fn hold_busy_lock(paths: &AgentPaths) -> Result<()> {
     use std::os::fd::IntoRawFd;
     let file = fs::OpenOptions::new()
@@ -993,6 +1013,15 @@ pub fn processes(paths: &AgentPaths) -> Result<Option<Vec<u32>>> {
     if busy {
         pids.extend(sandbox::lock_holders(&paths.busy_lock));
     }
+    #[cfg(windows)]
+    let busy = {
+        let job = sys::agent_job_pids(&paths.busy_lock)
+            .at("query the job object of", &paths.busy_lock)?;
+        let me = std::process::id();
+        let others = job.iter().any(|&pid| pid != me);
+        pids.extend(job.into_iter().filter(|&pid| pid != me));
+        busy || others
+    };
     pids.sort_unstable();
     pids.dedup();
     Ok((busy || !pids.is_empty()).then_some(pids))

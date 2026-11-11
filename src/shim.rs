@@ -1,6 +1,7 @@
 //! The `cargo` shim.
 //!
-//! `<ferry home>/bin/cargo` is a symlink to the ferry binary. When ferry
+//! `<ferry home>/bin/cargo` is a symlink to the ferry binary (on Windows,
+//! `cargo.exe` is a hard link or copy of `ferry.exe`). When ferry
 //! runs under the name `cargo` it resolves the agent from the working
 //! directory on every call and runs the real cargo inside that agent's
 //! sandbox, with that agent's target dir. Outside any agent worktree it runs
@@ -10,14 +11,12 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead as _, Write};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::process::{CommandExt, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use crate::context::Context;
 use crate::error::{Error, IoContext, Result};
+use crate::sys::{self, OsStrExt, OsStringExt};
 
 pub const NAME: &str = "cargo";
 
@@ -33,12 +32,23 @@ pub(crate) fn next_depth() -> String {
     (depth + 1).to_string()
 }
 
-/// True if the process was started through the shim symlink.
+/// True if the process was started through the shim link.
 pub fn invoked_as_cargo() -> bool {
-    std::env::args_os()
-        .next()
-        .and_then(|a| Path::new(&a).file_name().map(|n| n == NAME))
-        .unwrap_or(false)
+    invoked_as(NAME)
+}
+
+/// True if this process runs under the program name `name`: `argv[0]` on
+/// Unix (the symlink's name); the executable's own file name on Windows,
+/// where the shim is a hard link and `argv[0]` is whatever the caller typed.
+pub(crate) fn invoked_as(name: &str) -> bool {
+    #[cfg(unix)]
+    let program = std::env::args_os().next().map(PathBuf::from);
+    #[cfg(windows)]
+    let program = std::env::current_exe().ok();
+    program
+        .as_deref()
+        .and_then(Path::file_name)
+        .is_some_and(|n| sys::is_program(n, name))
 }
 
 /// The directory holding the shim, creating it and (re)pointing the `cargo`
@@ -67,10 +77,11 @@ pub fn home() -> Result<PathBuf> {
 
 /// [`bin_dir`], creating it and (re)pointing the `name` symlink at the
 /// running ferry binary.
+#[cfg(unix)]
 pub(crate) fn ensure_link(name: &str) -> Result<PathBuf> {
     let dir = bin_dir()?;
     let exe = std::env::current_exe().at("locate", "the ferry binary")?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = sys::canonicalize(&exe).unwrap_or(exe);
     let link = dir.join(name);
     if std::fs::symlink_metadata(&link).is_ok_and(|m| !m.is_symlink()) {
         return Err(Error::Refused(format!(
@@ -82,8 +93,70 @@ pub(crate) fn ensure_link(name: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Marks a directory as a Ferry `bin` dir, so [`real_cargo`] never picks a
+/// shim from it. On Unix the shim is recognised as a symlink to `ferry`; a
+/// Windows hard link or copy is named `cargo.exe` like the real one.
+#[cfg(windows)]
+const BIN_MARKER: &str = ".ferry-bin";
+
+/// [`bin_dir`], with `name.exe` a hard link to (or, across volumes, a copy
+/// of) the running ferry binary. Windows symlinks need Developer Mode or
+/// admin rights, and a hard link runs as ferry under its own name.
+///
+/// A running executable can be renamed but not replaced or deleted, so an
+/// outdated link is renamed aside first, then the new one renamed into
+/// place; leftovers are deleted once no process runs them.
+#[cfg(windows)]
+pub(crate) fn ensure_link(name: &str) -> Result<PathBuf> {
+    let dir = bin_dir()?;
+    let marker = dir.join(BIN_MARKER);
+    if !marker.exists() {
+        std::fs::write(&marker, b"").at("create", &marker)?;
+    }
+    let exe = std::env::current_exe().at("locate", "the ferry binary")?;
+    let link = dir.join(sys::exe_name(name));
+    for entry in std::fs::read_dir(&dir)
+        .at("read directory", &dir)?
+        .flatten()
+    {
+        if entry.file_name().to_string_lossy().contains(".old-") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    if is_current(&exe, &link) {
+        return Ok(dir);
+    }
+    let tmp = dir.join(format!(".{name}.tmp-{}.exe", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    if std::fs::hard_link(&exe, &tmp).is_err() {
+        std::fs::copy(&exe, &tmp).at("copy the ferry binary to", &tmp)?;
+    }
+    if link.exists() {
+        let aside = dir.join(format!(".{name}.old-{}.exe", std::process::id()));
+        std::fs::rename(&link, &aside).at("rename aside", &link)?;
+    }
+    std::fs::rename(&tmp, &link).at("rename into place", &link)?;
+    Ok(dir)
+}
+
+/// Whether `link` already runs `exe`: the same file, or a copy of the same
+/// length and modification time.
+#[cfg(windows)]
+fn is_current(exe: &Path, link: &Path) -> bool {
+    if let (Ok(a), Ok(b)) = (sys::file_id(exe), sys::file_id(link))
+        && a == b
+    {
+        return true;
+    }
+    match (std::fs::metadata(exe), std::fs::metadata(link)) {
+        (Ok(a), Ok(b)) => a.len() == b.len() && sys::mtime(&a) == sys::mtime(&b),
+        _ => false,
+    }
+}
+
 /// Points the symlink `link` at `target`, replacing an existing one
 /// atomically so a concurrent reader never finds it missing.
+#[cfg(unix)]
 pub(crate) fn symlink_atomic(target: &Path, link: &Path) -> Result<()> {
     if std::fs::read_link(link).ok().as_deref() == Some(target) {
         return Ok(());
@@ -106,7 +179,24 @@ pub fn path_with(shim_dir: &Path) -> OsString {
 
 /// The first `cargo` on `PATH` that is not a ferry binary: neither this one
 /// nor another ferry's shim (two shims picking each other would loop).
+#[cfg(windows)]
 pub fn real_cargo() -> Option<PathBuf> {
+    let me = std::env::current_exe()
+        .ok()
+        .and_then(|e| sys::file_id(&e).ok());
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .filter(|d| !d.join(BIN_MARKER).exists())
+        .map(|d| d.join(sys::exe_name(NAME)))
+        .find(|candidate| {
+            std::fs::metadata(candidate).is_ok_and(|m| m.is_file())
+                && sys::file_id(candidate).ok() != me
+        })
+}
+
+#[cfg(unix)]
+pub fn real_cargo() -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
     let me = std::env::current_exe()
         .ok()
         .and_then(|e| std::fs::metadata(e).ok());
@@ -114,7 +204,7 @@ pub fn real_cargo() -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|d| d.join(NAME))
         .find(|candidate| {
-            let is_ferry = std::fs::canonicalize(candidate)
+            let is_ferry = sys::canonicalize(candidate)
                 .is_ok_and(|real| real.file_name().is_some_and(|n| n == "ferry"));
             match std::fs::metadata(candidate) {
                 Ok(meta) => {
@@ -194,6 +284,7 @@ fn run(cargo: &Path, args: &[OsString]) -> Result<std::convert::Infallible> {
         {
             keep_incremental(&mut command, &cargo_version.to_string_lossy(), args, &cwd);
         }
+        lower_priority(&mut command);
         if let (Some(records), Some(target)) = (std::env::var_os(WARM_UNITS_ENV), target) {
             let root = target
                 .strip_prefix(&warm_target)
@@ -203,7 +294,24 @@ fn run(cargo: &Path, args: &[OsString]) -> Result<std::convert::Infallible> {
         }
     }
     command.args(args);
-    Err(exec_error(cargo, command.exec()))
+    Err(exec_error(cargo, sys::exec(&mut command)))
+}
+
+/// Opts out of [`lower_priority`] when set to `normal`.
+pub const PRIORITY_ENV: &str = "FERRY_BUILD_PRIORITY";
+
+/// On Windows, starts `command` (an agent's or a base's cargo) at below-normal
+/// priority, which every process it starts inherits: parallel agents' builds
+/// then leave the desktop responsive, at no measurable cost to the builds.
+/// `FERRY_BUILD_PRIORITY=normal` turns it off.
+pub(crate) fn lower_priority(command: &mut Command) {
+    #[cfg(windows)]
+    if std::env::var_os(PRIORITY_ENV).is_none_or(|p| p != "normal") {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS);
+    }
+    #[cfg(unix)]
+    let _ = command;
 }
 
 /// Variables whose presence makes Cargo 1.99 and later (cargo#17220) turn
@@ -414,7 +522,7 @@ fn observe(
     };
     command.args(&args);
     let Some(forward_messages) = forward_messages else {
-        return Err(exec_error(cargo, command.exec()));
+        return Err(exec_error(cargo, sys::exec(&mut command)));
     };
     let mut log = crate::prune::Log::start(records, target, root)?;
     let mut child = command
@@ -440,9 +548,12 @@ fn observe(
         let _ = out.flush();
     }
     let status = child.wait().map_err(|e| exec_error(cargo, e))?;
-    let code = status
-        .code()
-        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
+    #[cfg(unix)]
+    let code = status.code().unwrap_or_else(|| {
+        128 + std::os::unix::process::ExitStatusExt::signal(&status).unwrap_or(0)
+    });
+    #[cfg(windows)]
+    let code = status.code().unwrap_or(1);
     log.end(code)?;
     std::process::exit(code)
 }
@@ -541,12 +652,12 @@ pub(crate) fn workspace(
     let Some(root) = located
         .as_deref()
         .and_then(Path::parent)
-        .and_then(|r| std::fs::canonicalize(r).ok())
+        .and_then(|r| sys::canonicalize(r).ok())
     else {
         return Workspace::Root;
     };
     for dir in checkout {
-        if let Some(rel) = std::fs::canonicalize(dir)
+        if let Some(rel) = sys::canonicalize(dir)
             .ok()
             .and_then(|dir| root.strip_prefix(dir).ok().map(Path::to_path_buf))
         {
@@ -591,7 +702,7 @@ fn manifest_path(args: &[OsString]) -> Option<&OsStr> {
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
-    let resolve = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let resolve = |p: &Path| sys::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     resolve(a) == resolve(b)
 }
 

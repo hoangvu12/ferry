@@ -676,7 +676,7 @@ fn doctor_cmd(
 ) -> anyhow::Result<ExitCode> {
     if apparmor_profile {
         let exe = std::env::current_exe().context("cannot locate the ferry binary")?;
-        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+        let exe = crate::sys::canonicalize(&exe).unwrap_or(exe);
         if let Some(unusable) = doctor::apparmor_path_unusable(&exe) {
             anyhow::bail!(unusable);
         }

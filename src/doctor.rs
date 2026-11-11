@@ -205,9 +205,7 @@ fn remap_check(
 }
 
 fn store_check(root: &Path, caps: &Capabilities) -> Check {
-    let free = rustix::fs::statvfs(root)
-        .map(|s| s.f_bavail.saturating_mul(s.f_frsize))
-        .ok();
+    let free = crate::sys::free_space(root).ok();
     let detail = format!(
         "{} ({}{})",
         root.display(),
@@ -238,12 +236,18 @@ fn store_check(root: &Path, caps: &Capabilities) -> Check {
 }
 
 fn namespace_checks(caps: &Capabilities) -> Vec<Check> {
-    if caps.os == Os::Macos {
+    if caps.os != Os::Linux {
+        let os = if caps.os == Os::Windows {
+            "Windows"
+        } else {
+            "macOS"
+        };
         return vec![info(
             "sandbox",
-            "macOS has no mount namespaces: agents build at their own paths (only crates that \
-             captured the base's paths rebuild; no incremental reuse on the first edit)"
-                .into(),
+            format!(
+                "{os} has no mount namespaces: agents build at their own paths (only crates \
+                 that captured the base's paths rebuild; no incremental reuse on the first edit)"
+            ),
         )];
     }
     let mut out = Vec::new();
@@ -420,6 +424,15 @@ pub fn apparmor_path_problem(binary: &Path) -> Option<String> {
 
 /// The nearest of `path` and its ancestors that is missing or that a
 /// non-root user could write to or replace.
+///
+/// Only used for the root-owned `AppArmor` install path; on Windows every path
+/// counts as user-writable.
+#[cfg(windows)]
+pub fn user_writable_ancestor(path: &Path) -> Option<PathBuf> {
+    Some(path.to_path_buf())
+}
+
+#[cfg(unix)]
 pub fn user_writable_ancestor(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     // A sticky directory keeps others from renaming the root-owned entry

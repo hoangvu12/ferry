@@ -10,14 +10,16 @@
 //! from source to target is identical in the base and every agent.
 
 use std::ffi::{OsStr, OsString};
+#[cfg_attr(windows, allow(unused_imports))]
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use crate::error::{Error, IoContext, Result};
+#[cfg_attr(windows, allow(unused_imports))]
+use crate::error::IoContext;
+use crate::error::{Error, Result};
+use crate::sys::{OsStrExt, OsStringExt};
 use crate::toolchain::Toolchain;
 
 /// Name of the wrapper symlink in the shim directory.
@@ -63,13 +65,21 @@ pub struct Wrapper {
 /// artifact names.
 pub fn ensure_wrapper(toolchain: &Toolchain) -> Result<Wrapper> {
     Ok(Wrapper {
-        path: crate::shim::ensure_link(WRAPPER_NAME)?.join(WRAPPER_NAME),
+        path: crate::shim::ensure_link(WRAPPER_NAME)?.join(crate::sys::exe_name(WRAPPER_NAME)),
         nightly: toolchain.is_nightly(),
     })
 }
 
+#[cfg(windows)]
+pub fn prepare(_: &Path, _: &Path) -> Result<PathBuf> {
+    Err(Error::Refused(
+        "remap-paths is not supported on Windows yet; set `[sandbox] remap-paths = false`".into(),
+    ))
+}
+
 /// Creates `<src_root>/.ferry-target -> target` (hidden from `git status`)
 /// and returns the link path, which builds use as their target dir.
+#[cfg(unix)]
 pub fn prepare(src_root: &Path, target: &Path) -> Result<PathBuf> {
     let link = src_root.join(TARGET_LINK);
     let target = std::path::absolute(target).at("resolve", target)?;
@@ -89,6 +99,7 @@ pub fn prepare(src_root: &Path, target: &Path) -> Result<PathBuf> {
 
 /// Adds `/.ferry-target` to the repository's shared `info/exclude`, which
 /// every worktree reads.
+#[cfg(unix)]
 fn hide_from_git(src_root: &Path) -> Result<()> {
     let info = crate::git::Repo::discover(src_root)?
         .common_dir
@@ -132,12 +143,9 @@ pub fn cargo_env(wrapper: &Wrapper) -> Vec<(OsString, OsString)> {
     env
 }
 
-/// True if the process was started through the wrapper symlink.
+/// True if the process was started through the wrapper link.
 pub fn invoked_as_wrapper() -> bool {
-    std::env::args_os()
-        .next()
-        .and_then(|a| Path::new(&a).file_name().map(|n| n == WRAPPER_NAME))
-        .unwrap_or(false)
+    crate::shim::invoked_as(WRAPPER_NAME)
 }
 
 /// Entry point when invoked as `ferry-rustc <rustc> <args...>`.
@@ -172,7 +180,7 @@ pub fn main() -> ExitCode {
             command.args(&args);
         }
     }
-    let err = command.exec();
+    let err = crate::sys::exec(&mut command);
     let _ = writeln!(
         io::stderr(),
         "ferry-rustc: failed to run `{}`: {err}",
@@ -240,7 +248,7 @@ struct Roots {
 impl Roots {
     /// `cwd` must be canonical, as `std::env::current_dir` returns it.
     fn new(cwd: PathBuf) -> Self {
-        let target = fs::canonicalize(cwd.join(TARGET_LINK)).ok();
+        let target = crate::sys::canonicalize(cwd.join(TARGET_LINK)).ok();
         Self { cwd, target }
     }
 
@@ -249,11 +257,11 @@ impl Roots {
     /// `name=/..` for `--extern`).
     fn rewrite(&self, arg: &OsStr) -> OsString {
         let bytes = arg.as_bytes();
-        let start = if bytes.starts_with(b"/") {
+        let start = if starts_absolute(bytes) {
             0
         } else {
             match bytes.iter().position(|b| *b == b'=') {
-                Some(eq) if bytes.get(eq + 1) == Some(&b'/') => eq + 1,
+                Some(eq) if starts_absolute(&bytes[eq + 1..]) => eq + 1,
                 _ => return arg.to_owned(),
             }
         };
@@ -288,13 +296,24 @@ impl Roots {
     }
 }
 
+/// Whether `bytes` start with an absolute path: `/` on Unix; also a drive
+/// (`C:\`, `C:/`) or a UNC or verbatim prefix (`\\`) on Windows.
+fn starts_absolute(bytes: &[u8]) -> bool {
+    if bytes.starts_with(b"/") {
+        return true;
+    }
+    cfg!(windows)
+        && (bytes.starts_with(b"\\\\")
+            || matches!(bytes, [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic()))
+}
+
 /// `path` with symlinks resolved, also for outputs that do not exist yet: the
 /// deepest existing ancestor is canonicalized and the rest appended.
 fn resolve(path: &Path) -> Option<PathBuf> {
     let mut missing = Vec::new();
     let mut existing = path;
     loop {
-        if let Ok(canonical) = fs::canonicalize(existing) {
+        if let Ok(canonical) = crate::sys::canonicalize(existing) {
             return Some(missing.iter().rev().fold(canonical, |p, c| p.join(c)));
         }
         missing.push(existing.file_name()?);
@@ -387,7 +406,7 @@ mod tests {
     #[test]
     fn rewrites_paths_under_cwd_and_target_link() {
         let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
+        let root = crate::sys::canonicalize(dir.path()).unwrap();
         let (ws, target) = (root.join("ws"), root.join("target"));
         fs::create_dir_all(ws.join("src")).unwrap();
         fs::create_dir_all(target.join("debug/deps")).unwrap();

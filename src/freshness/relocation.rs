@@ -40,17 +40,18 @@
 //! rewrites. So every textual spelling of an old path contains its needle,
 //! and what follows the needle tells which part of the store it names.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use memchr::memmem;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, IoContext, Result};
+use crate::sys::{OsStrExt, OsStringExt};
 
 /// Bumped whenever a rule changes, so cached plans are recomputed.
 pub const RELOCATION_RULES: u32 = 1;
@@ -236,9 +237,10 @@ pub fn apply_relocation(target: &Path, plan: &RelocationPlan) -> Result<Relocati
 /// counts too, except rustdoc's, which compares mtimes, as build-script runs
 /// do. Reads `target` and both checkouts only.
 pub fn link_rebuilds(target: &Path, origin: &Origin, checkout: &Path) -> Result<Vec<PathBuf>> {
-    let base = fs::canonicalize(&origin.host_checkout).at("resolve", &origin.host_checkout)?;
-    let agent = fs::canonicalize(checkout).at("resolve", checkout)?;
-    let store = fs::canonicalize(&origin.store).unwrap_or_else(|_| origin.store.clone());
+    let base =
+        crate::sys::canonicalize(&origin.host_checkout).at("resolve", &origin.host_checkout)?;
+    let agent = crate::sys::canonicalize(checkout).at("resolve", checkout)?;
+    let store = crate::sys::canonicalize(&origin.store).unwrap_or_else(|_| origin.store.clone());
     let mut stale = Vec::new();
     for unit in Inventory::of(target)?.units {
         let moved = match &unit.detail {
@@ -292,7 +294,7 @@ fn checkout_input(origin: &Origin, ws: &Path, input: &[u8]) -> Option<PathBuf> {
     }
     [
         Some(origin.checkout.clone()),
-        fs::canonicalize(&origin.checkout).ok(),
+        crate::sys::canonicalize(&origin.checkout).ok(),
     ]
     .into_iter()
     .flatten()
@@ -303,7 +305,7 @@ fn checkout_input(origin: &Origin, ws: &Path, input: &[u8]) -> Option<PathBuf> {
 /// kernel does: relative to `root` inside it, else absolute; `None` if it
 /// leads nowhere.
 fn resolve(root: &Path, rel: &Path) -> Option<PathBuf> {
-    let path = fs::canonicalize(root.join(rel)).ok()?;
+    let path = crate::sys::canonicalize(root.join(rel)).ok()?;
     Some(
         path.strip_prefix(root)
             .map_or_else(|_| path.clone(), Path::to_path_buf),
@@ -372,9 +374,68 @@ fn remove_entry(path: &Path) -> Result<()> {
     }
 }
 
-/// Bytes that no escaping or normalization of a path rewrites.
+/// Bytes that no escaping or normalization of a path rewrites. On Windows
+/// `\` counts too: [`fold`] turns every spelling of a separator into `/`
+/// before a needle is searched for, and a file is scanned in pieces that end
+/// after a byte that is not plain, so a piece never splits a separator run.
 fn plain(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/')
+    b.is_ascii_alphanumeric()
+        || matches!(b, b'.' | b'_' | b'-' | b'/')
+        || (cfg!(windows) && b == b'\\')
+}
+
+/// Windows records a path's separators as `\`, as `\\` in JSON and Debug
+/// output, and sometimes as `/` (git, some build scripts). Every byte
+/// string relocation searches or compares is folded so that each run of
+/// backslashes reads as one `/`, which gives the needles and the
+/// classification after them a single spelling. Folding only ever adds
+/// matches, so it can only make a plan remove more. Unchanged on Unix.
+fn fold(bytes: &[u8]) -> Cow<'_, [u8]> {
+    if !cfg!(windows) || !bytes.contains(&b'\\') {
+        return Cow::Borrowed(bytes);
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut in_run = false;
+    for &b in bytes {
+        if b == b'\\' {
+            if !in_run {
+                out.push(b'/');
+            }
+            in_run = true;
+        } else {
+            out.push(b);
+            in_run = false;
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// [`fold`] for a value that is moved into place.
+fn folded(bytes: Vec<u8>) -> Vec<u8> {
+    match fold(&bytes) {
+        Cow::Borrowed(_) => bytes,
+        Cow::Owned(out) => out,
+    }
+}
+
+/// Whether folded `path` is absolute: it starts with `/`, or on Windows with
+/// a drive (`C:/`); UNC and verbatim prefixes fold to a leading `/`.
+fn is_abs(path: &[u8]) -> bool {
+    path.starts_with(b"/")
+        || (cfg!(windows) && matches!(path, [drive, b':', b'/', ..] if drive.is_ascii_alphabetic()))
+}
+
+/// Whether folded `value` is one absolute path rather than a list of them
+/// (`:`-separated on Unix, `;`-separated on Windows, where a drive's `:` is
+/// part of the path).
+fn is_single_path(value: &[u8]) -> bool {
+    if cfg!(windows) {
+        is_abs(value)
+            && !value.contains(&b';')
+            && !value.get(2..).unwrap_or_default().contains(&b':')
+    } else {
+        is_abs(value) && !value.contains(&b':')
+    }
 }
 
 /// Whether a path component ends where `rest` starts.
@@ -459,10 +520,10 @@ impl Needles {
             (&origin.store, Root::Store),
             (&origin.git_dir, Root::GitDir),
         ] {
-            let given = normalize(root.as_os_str().as_bytes());
-            let canonical = fs::canonicalize(root)
+            let given = normalize(&fold(root.as_os_str().as_bytes()));
+            let canonical = crate::sys::canonicalize(root)
                 .ok()
-                .map(|p| p.into_os_string().into_vec());
+                .map(|p| folded(p.into_os_string().into_vec()));
             for spelling in [given, canonical].into_iter().flatten() {
                 let needle = plain_suffix(&spelling);
                 if needle.len() < MIN_NEEDLE {
@@ -614,9 +675,8 @@ impl DepInfo {
         for line in contents.split(|&b| b == b'\n') {
             if let Some(env) = line.strip_prefix(b"# env-dep:") {
                 if let Some(eq) = env.iter().position(|&b| b == b'=') {
-                    let value = unescape_env(&env[eq + 1..]);
-                    let single_path = value.starts_with(b"/") && !value.contains(&b':');
-                    let value = single_path
+                    let value = folded(unescape_env(&env[eq + 1..]));
+                    let value = is_single_path(&value)
                         .then(|| normalize(&value))
                         .flatten()
                         .unwrap_or(value);
@@ -630,7 +690,7 @@ impl DepInfo {
             let Some(colon) = line.windows(2).position(|w| w == b": ") else {
                 continue;
             };
-            let target = unescape_spaces(&line[..colon]);
+            let target = folded(unescape_spaces(&line[..colon]));
             if let Some(name) = os(&target).file_name()
                 && Some(name) != own
             {
@@ -640,7 +700,8 @@ impl DepInfo {
                 first = false;
                 self.inputs
                     .extend(split_inputs(&line[colon + 2..]).into_iter().map(|input| {
-                        if input.starts_with(b"/") {
+                        let input = folded(input);
+                        if is_abs(&input) {
                             normalize(&input).unwrap_or(input)
                         } else {
                             input
@@ -1051,7 +1112,7 @@ impl Inventory {
             if name.starts_with(b"dep-") || name.ends_with(b".json") {
                 match (&mut records, fs::read(dir.join(file))) {
                     (Some(all), Ok(bytes)) => {
-                        all.extend_from_slice(&bytes);
+                        all.extend_from_slice(&fold(&bytes));
                         all.push(0);
                     }
                     _ => records = None,
@@ -1088,9 +1149,12 @@ fn detail_is_run(detail: &Detail) -> bool {
 impl RunFiles {
     fn read(target: &Path, stdout: &Path, root_output: &Path, out_dir: PathBuf) -> Self {
         Self {
-            stdout: fs::read(target.join(stdout)).ok(),
-            root_output: fs::read(target.join(root_output)).ok(),
-            out_dir,
+            stdout: fs::read(target.join(stdout)).ok().map(folded),
+            root_output: fs::read(target.join(root_output)).ok().map(folded),
+            // Compared with folded paths below the target root.
+            out_dir: PathBuf::from(OsString::from_vec(folded(
+                out_dir.into_os_string().into_vec(),
+            ))),
         }
     }
 }
@@ -1202,7 +1266,7 @@ fn scan_file(path: &Path, mut scan: impl FnMut(&[u8])) -> io::Result<()> {
     let mut buf = Vec::new();
     loop {
         if (&mut file).take(CHUNK as u64).read_to_end(&mut buf)? == 0 {
-            scan(&buf);
+            scan(&fold(&buf));
             return Ok(());
         }
         let end = buf.iter().rposition(|&b| !plain(b)).map_or(0, |i| i + 1);
@@ -1212,7 +1276,7 @@ fn scan_file(path: &Path, mut scan: impl FnMut(&[u8])) -> io::Result<()> {
                 "a run of path bytes longer than any path",
             ));
         }
-        scan(&buf[..end]);
+        scan(&fold(&buf[..end]));
         buf.drain(..end);
     }
 }
@@ -1344,9 +1408,9 @@ impl<'a> Planner<'a> {
             .iter()
             .map(|u| {
                 u.dep_info().is_some_and(|info| {
-                    info.inputs.iter().any(|i| {
-                        !i.starts_with(b"/") || needles.hits(i).any(|(_, c)| c == Class::Src)
-                    })
+                    info.inputs
+                        .iter()
+                        .any(|i| !is_abs(i) || needles.hits(i).any(|(_, c)| c == Class::Src))
                 })
             })
             .collect();
@@ -1553,12 +1617,12 @@ impl<'a> Planner<'a> {
                     .is_ok()
                 } else if kind.is_symlink() {
                     fs::read_link(&path).is_ok_and(|link| {
-                        let link = link.into_os_string().into_vec();
-                        if link.starts_with(b"/") {
+                        let link = folded(link.into_os_string().into_vec());
+                        if is_abs(&link) {
                             flagged |= needles.other_than_live(&link, &mut live);
                             return true;
                         }
-                        let mut resolved = rel.as_os_str().as_bytes().to_vec();
+                        let mut resolved = fold(rel.as_os_str().as_bytes()).into_owned();
                         resolved.push(b'/');
                         resolved.extend_from_slice(&link);
                         // A relative link may lead anywhere in the target,
@@ -1732,7 +1796,7 @@ impl<'a> Planner<'a> {
         }
         for checkout in [
             Some(self.origin.checkout.clone()),
-            fs::canonicalize(&self.origin.checkout).ok(),
+            crate::sys::canonicalize(&self.origin.checkout).ok(),
         ]
         .into_iter()
         .flatten()
@@ -1858,7 +1922,7 @@ impl<'a> Planner<'a> {
 /// Whether `value`, a single path, is a directory holding one of the
 /// compile's own inputs.
 fn is_input_prefix(info: &DepInfo, value: &[u8]) -> bool {
-    value.starts_with(b"/")
+    is_abs(value)
         && info
             .inputs
             .iter()

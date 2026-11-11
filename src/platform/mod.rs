@@ -13,12 +13,15 @@ use serde::{Deserialize, Serialize};
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(windows)]
+pub mod windows;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Os {
     Linux,
     Macos,
+    Windows,
 }
 
 impl Os {
@@ -26,6 +29,8 @@ impl Os {
     pub fn current() -> Self {
         if cfg!(target_os = "macos") {
             Os::Macos
+        } else if cfg!(windows) {
+            Os::Windows
         } else {
             Os::Linux
         }
@@ -107,6 +112,10 @@ impl Capabilities {
         {
             macos::detect(store_root)
         }
+        #[cfg(windows)]
+        {
+            windows::detect(store_root)
+        }
     }
 
     pub fn sysctl(&self, name: &str) -> Option<&str> {
@@ -133,10 +142,12 @@ pub fn exclude_from_backups(path: &Path) -> std::io::Result<()> {
 
 /// Tries a copy-on-write clone between two scratch files in `dir`, using the
 /// same call the reflink backend uses.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn probe_reflink(dir: &Path) -> Probe {
     let scratch = dir.join(format!(".ferry-reflink-probe-{}", std::process::id()));
     let result = (|| {
         std::fs::create_dir_all(&scratch).map_err(|e| ("create scratch dir", e))?;
+        #[cfg_attr(windows, allow(unused_variables))]
         let (src, dst) = (scratch.join("src"), scratch.join("dst"));
         std::fs::write(&src, b"ferry reflink probe").map_err(|e| ("write", e))?;
         #[cfg(target_os = "linux")]

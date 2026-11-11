@@ -19,7 +19,7 @@ Ferry builds on Linux and macOS (not Windows). You need:
 
   ```sh
   rustup toolchain install stable
-  rustup toolchain install 1.88 nightly --profile minimal
+  rustup toolchain install 1.89 nightly --profile minimal
   ```
 
 - A C compiler and linker (`cc`), and `git`.
@@ -38,7 +38,7 @@ CI runs these on every pull request. Run them locally before pushing:
 | --- | --- |
 | rustfmt | `cargo fmt --all --check` |
 | clippy (Linux, macOS) | `cargo clippy --all-targets --locked -- -D warnings` |
-| test (Linux, macOS; stable and 1.88) | `cargo test --locked` and `cargo +1.88 test --locked` |
+| test (Linux, macOS; stable and 1.89) | `cargo test --locked` and `cargo +1.89 test --locked` |
 | test (Linux, nightly; not required) | `cargo +nightly test --locked` |
 | test (macos-26, stable, remap-paths) | `FERRY_TEST_REMAP=1 cargo test --locked` |
 | rustdoc | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked` |
@@ -135,10 +135,10 @@ because Dependabot does not update it.
 
 ## MSRV
 
-The minimum supported Rust version is **1.88**, declared as `rust-version` in
+The minimum supported Rust version is **1.89**, declared as `rust-version` in
 `Cargo.toml` and tested in CI on Linux and macOS. Raising it is allowed when a
 dependency or a language feature needs it; do it in its own commit, update
-`rust-version` and the `1.88` in `.github/workflows/ci.yml` together, and note
+`rust-version` and the `1.89` in `.github/workflows/ci.yml` together, and note
 it in the PR description. `Cargo.lock` is resolved with the MSRV-aware
 resolver, so `cargo update` picks dependency versions that support the MSRV;
-the 1.88 test jobs fail if a newer Rust slips in.
+the 1.89 test jobs fail if a newer Rust slips in.

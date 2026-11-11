@@ -490,6 +490,56 @@ pub fn shell_quote(arg: &str) -> String {
     }
 }
 
+/// Splits `line` into words as `sh` would, if it is only words: whitespace
+/// separates them, single quotes and double quotes group, and a backslash
+/// escapes the next character outside single quotes. `None` for anything
+/// else a shell would interpret (operators, expansions, globs, comments, a
+/// leading variable assignment), so the caller runs such a line with a
+/// shell. Reverses [`shell_quote`].
+pub fn split_words(line: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => words.extend(word.take()),
+            '\'' => {
+                let w = word.get_or_insert_with(String::new);
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        c => w.push(c),
+                    }
+                }
+            }
+            '"' => {
+                let w = word.get_or_insert_with(String::new);
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => match chars.next()? {
+                            c @ ('"' | '\\' | '$' | '`') => w.push(c),
+                            c => {
+                                w.push('\\');
+                                w.push(c);
+                            }
+                        },
+                        '$' | '`' => return None,
+                        c => w.push(c),
+                    }
+                }
+            }
+            '\\' => word.get_or_insert_with(String::new).push(chars.next()?),
+            '|' | '&' | ';' | '<' | '>' | '(' | ')' | '$' | '`' | '*' | '?' | '[' | ']' | '{'
+            | '}' | '~' | '#' | '\n' | '\r' => return None,
+            '=' if words.is_empty() => return None,
+            c => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    words.extend(word);
+    Some(words)
+}
+
 /// Written by `ferry init`.
 pub const TEMPLATE: &str = r#"# Ferry configuration: https://patwrall.github.io/ferry/configuration.html
 

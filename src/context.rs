@@ -57,7 +57,7 @@ fn resolve(dir: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<(Repo, Se
     let parent = settings.store_parent.clone().ok_or(Error::NoStoreDir)?;
     // Canonical so that reaching the repository through a symlink still
     // finds the same store.
-    let common_dir = std::fs::canonicalize(&repo.common_dir).at("resolve", &repo.common_dir)?;
+    let common_dir = crate::sys::canonicalize(&repo.common_dir).at("resolve", &repo.common_dir)?;
     let root = parent.join(store::repo_key(&common_dir, &display_name(&common_dir)));
     Ok((repo, settings, root))
 }

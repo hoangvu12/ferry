@@ -55,8 +55,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15]
-        # 1.88 is package.rust-version in Cargo.toml; bump both together.
-        rust: [stable, "1.88"]
+        # 1.89 is package.rust-version in Cargo.toml; bump both together.
+        rust: [stable, "1.89"]
         include:
           # auto freshness selects checksum freshness on nightly toolchains.
           - os: ubuntu-24.04
@@ -98,8 +98,8 @@ jobs:
         env:
           # Fail instead of skipping tests when a capability these runners
           # have goes undetected. remap: tests/remap.rs fails instead of
-          # skipping when the toolchain cannot remap (only 1.88 is too old).
-          FERRY_TEST_REQUIRE: ${{ runner.os == 'Linux' && 'userns,overlay,clippy' || 'reflink,clippy' }}${{ matrix.rust != '1.88' && ',remap' || '' }}
+          # skipping when the toolchain cannot remap (only 1.89 is too old).
+          FERRY_TEST_REQUIRE: ${{ runner.os == 'Linux' && 'userns,overlay,clippy' || 'reflink,clippy' }}${{ matrix.rust != '1.89' && ',remap' || '' }}
           # tests/common passes FERRY_REMAP_PATHS=1 to every ferry command.
           FERRY_TEST_REMAP: ${{ matrix.remap && '1' || '' }}
         run: |

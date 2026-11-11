@@ -4,13 +4,13 @@
 //! and restores permissions and mtimes.
 
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs;
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::{ForkError, ForkStats, io_err};
+use crate::sys;
 
 /// How one regular file is materialized. Must create `dst` (which does not
 /// exist yet) with `src`'s bytes.
@@ -33,7 +33,7 @@ pub(crate) fn clone_tree(src: &Path, dst: &Path, op: FileOp) -> Result<ForkStats
     let mut files = Vec::new();
     let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut dirs: Vec<(PathBuf, fs::Metadata)> = Vec::new();
-    let mut first_link: HashMap<(u64, u64), PathBuf> = HashMap::new();
+    let mut first_link: HashMap<sys::FileId, PathBuf> = HashMap::new();
 
     let root_meta = fs::symlink_metadata(src).map_err(io_err("stat", src))?;
     fs::create_dir(dst).map_err(io_err("create directory", dst))?;
@@ -51,15 +51,15 @@ pub(crate) fn clone_tree(src: &Path, dst: &Path, op: FileOp) -> Result<ForkStats
                 dirs.push((to.clone(), meta));
                 stack.push((from, to));
             } else if kind.is_symlink() {
-                let target = fs::read_link(&from).map_err(io_err("read symlink", &from))?;
-                std::os::unix::fs::symlink(&target, &to).map_err(io_err("create symlink", &to))?;
+                sys::copy_symlink(&from, &to).map_err(io_err("create symlink", &to))?;
                 set_times(&to, &meta, true).map_err(io_err("set times on", &to))?;
             } else if kind.is_file() {
                 // Cargo hard-links artifacts from deps/ into the profile dir;
                 // keeping the link avoids a second clone and matches what Cargo
                 // would have produced.
-                if meta.nlink() > 1 {
-                    let key = (meta.dev(), meta.ino());
+                let stat = sys::stat(&from, &meta).map_err(io_err("stat", &from))?;
+                if stat.nlink > 1 {
+                    let key = stat.id;
                     if let Some(first) = first_link.get(&key) {
                         links.push((first.clone(), to));
                         continue;
@@ -88,8 +88,7 @@ pub(crate) fn clone_tree(src: &Path, dst: &Path, op: FileOp) -> Result<ForkStats
     // Deepest first: creating entries bumps a directory's mtime.
     dirs.sort_by_key(|(p, _)| std::cmp::Reverse(p.components().count()));
     for (dir, meta) in &dirs {
-        fs::set_permissions(dir, fs::Permissions::from_mode(meta.mode() & 0o7777))
-            .map_err(io_err("chmod", dir))?;
+        set_permissions(dir, meta).map_err(io_err("chmod", dir))?;
         set_times(dir, meta, false).map_err(io_err("set times on", dir))?;
     }
     Ok(ForkStats {
@@ -123,39 +122,53 @@ fn run_parallel(files: &[Job], op: FileOp) -> Result<(), ForkError> {
 
 fn materialize(job: &Job, op: FileOp) -> Result<(), ForkError> {
     op(&job.src, &job.dst).map_err(io_err("clone", &job.src))?;
-    fs::set_permissions(
-        &job.dst,
-        fs::Permissions::from_mode(job.meta.mode() & 0o7777),
-    )
-    .map_err(io_err("chmod", &job.dst))?;
+    set_permissions(&job.dst, &job.meta).map_err(io_err("chmod", &job.dst))?;
     set_times(&job.dst, &job.meta, false).map_err(io_err("set times on", &job.dst))
 }
 
 /// Cargo's freshness check compares mtimes, so a fork that does not preserve
 /// them is a fork that rebuilds everything.
 pub(super) fn set_times(path: &Path, meta: &fs::Metadata, symlink: bool) -> io::Result<()> {
-    use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, utimensat};
-    let ts = |secs: i64, nsec: i64| Timespec {
-        tv_sec: secs,
-        tv_nsec: nsec as _,
-    };
-    let times = Timestamps {
-        last_access: ts(meta.atime(), meta.atime_nsec()),
-        last_modification: ts(meta.mtime(), meta.mtime_nsec()),
-    };
-    let flags = if symlink {
-        AtFlags::SYMLINK_NOFOLLOW
-    } else {
-        AtFlags::empty()
-    };
-    utimensat(CWD, path, &times, flags).map_err(io::Error::from)
+    sys::set_times(path, sys::atime(meta), sys::mtime(meta), symlink)
+}
+
+/// Gives `path` the permissions in `meta`: the mode bits on Unix, the
+/// read-only attribute on Windows.
+fn set_permissions(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        fs::set_permissions(path, fs::Permissions::from_mode(meta.mode() & 0o7777))
+    }
+    #[cfg(windows)]
+    {
+        if meta.permissions().readonly() {
+            fs::set_permissions(path, meta.permissions())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Copies `src` to the new file `dst`. On filesystems that support it the
 /// kernel may share extents (`copy_file_range`), which is fine: the result is
 /// still a separate inode.
 pub(crate) fn copy_file(src: &Path, dst: &Path) -> io::Result<()> {
-    let mut from = File::open(src)?;
+    // `CopyFileExW`, the fastest copy Windows has; `dst` does not exist, so
+    // nothing is overwritten.
+    #[cfg(windows)]
+    {
+        fs::copy(src, dst).map(drop)
+    }
+    #[cfg(unix)]
+    {
+        copy_contents(src, dst)
+    }
+}
+
+#[cfg(unix)]
+fn copy_contents(src: &Path, dst: &Path) -> io::Result<()> {
+    let mut from = fs::File::open(src)?;
     let mut to = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -167,6 +180,7 @@ pub(crate) fn copy_file(src: &Path, dst: &Path) -> io::Result<()> {
 /// Bytes of files under `agent` that no longer share data with the file at
 /// the same path under `base` (rewritten, new, or changed size or mtime).
 /// Clones that were never written keep the base's size and mtime.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn private_bytes_vs_base(agent: &Path, base: &Path) -> Result<u64, ForkError> {
     let mut total = 0;
     let mut stack = vec![agent.to_path_buf()];
@@ -195,7 +209,7 @@ pub(crate) fn private_bytes_vs_base(agent: &Path, base: &Path) -> Result<u64, Fo
                     b.len() == meta.len() && b.modified().ok() == meta.modified().ok()
                 });
             if !shared {
-                total += meta.blocks() * 512;
+                total += sys::allocated(&meta);
             }
         }
     }
@@ -218,8 +232,12 @@ mod tests {
         .unwrap();
         fs::write(root.join("debug/.fingerprint/a-1/lib-a"), b"fp").unwrap();
         fs::write(root.join("debug/app"), b"#!bin").unwrap();
-        fs::set_permissions(root.join("debug/app"), fs::Permissions::from_mode(0o755)).unwrap();
-        std::os::unix::fs::symlink("deps/liba-1.rlib", root.join("debug/link")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root.join("debug/app"), fs::Permissions::from_mode(0o755)).unwrap();
+            std::os::unix::fs::symlink("deps/liba-1.rlib", root.join("debug/link")).unwrap();
+        }
     }
 
     #[test]
@@ -228,7 +246,7 @@ mod tests {
         let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
         fixture(&src);
         let old = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
-        File::options()
+        fs::File::options()
             .write(true)
             .open(src.join("debug/app"))
             .unwrap()
@@ -236,24 +254,25 @@ mod tests {
             .unwrap();
 
         let stats = clone_tree(&src, &dst, copy_file).unwrap();
-        assert_eq!(stats.files, 4);
+        assert_eq!(stats.files, if cfg!(unix) { 4 } else { 3 });
 
         assert_eq!(
             fs::read(dst.join("debug/.fingerprint/a-1/lib-a")).unwrap(),
             b"fp"
         );
         let app = fs::metadata(dst.join("debug/app")).unwrap();
-        assert_eq!(app.permissions().mode() & 0o777, 0o755);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(app.permissions().mode() & 0o777, 0o755);
+        }
         assert_eq!(app.modified().unwrap(), old);
-        let a = fs::metadata(dst.join("debug/deps/liba-1.rlib")).unwrap();
-        let b = fs::metadata(dst.join("debug/liba.rlib")).unwrap();
-        assert_eq!(a.ino(), b.ino(), "hard link preserved inside the fork");
-        let base = fs::metadata(src.join("debug/deps/liba-1.rlib")).unwrap();
-        assert_ne!(
-            a.ino(),
-            base.ino(),
-            "fork never shares inodes with the base"
-        );
+        let a = sys::file_id(&dst.join("debug/deps/liba-1.rlib")).unwrap();
+        let b = sys::file_id(&dst.join("debug/liba.rlib")).unwrap();
+        assert_eq!(a, b, "hard link preserved inside the fork");
+        let base = sys::file_id(&src.join("debug/deps/liba-1.rlib")).unwrap();
+        assert_ne!(a, base, "fork never shares inodes with the base");
+        #[cfg(unix)]
         assert_eq!(
             fs::read_link(dst.join("debug/link")).unwrap(),
             PathBuf::from("deps/liba-1.rlib")

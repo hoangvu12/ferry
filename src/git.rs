@@ -7,9 +7,9 @@
 //! itself checks out, which is exactly the class of bug Ferry exists to
 //! prevent. The git CLI is everywhere Ferry runs.
 
+use crate::sys::OsStringExt;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -452,7 +452,7 @@ pub fn ignored_paths(worktree: &Path) -> Result<Vec<String>> {
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
-    let resolve = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let resolve = |p: &Path| crate::sys::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     a == b || resolve(a) == resolve(b)
 }
 pub fn version() -> Result<String> {

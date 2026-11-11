@@ -10,7 +10,10 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
+#[cfg(unix)]
 use std::os::fd::AsFd;
+#[cfg(windows)]
+use std::os::windows::io::AsHandle;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -637,7 +640,7 @@ fn fingerprint(
 /// from the seeds before it, built from older sources than the ones stamping
 /// compares against; a build with the same inputs selects none of them.
 fn unit_inputs(ctx: &Context, commit: &CommitId) -> Result<String> {
-    use std::os::unix::ffi::OsStrExt;
+    use crate::sys::OsStrExt;
     // Bumped whenever what counts as an input changes, so that no base
     // recorded under the old definition matches. 2 added CARGO_INCREMENTAL
     // and CI: without it, a base warmed with them by an older Ferry would
@@ -713,13 +716,13 @@ fn unit_inputs(ctx: &Context, commit: &CommitId) -> Result<String> {
 /// Ferry's: those in directories above it, and an untracked one inside it.
 /// Ferry's builds run under the store, so Cargo never finds them there.
 pub fn unapplied_cargo_configs(ctx: &Context) -> Result<Vec<std::path::PathBuf>> {
-    let cargo_home = cargo_home().and_then(|home| fs::canonicalize(home).ok());
+    let cargo_home = cargo_home().and_then(|home| crate::sys::canonicalize(home).ok());
     let head = ctx.repo.resolve_commit("HEAD").ok();
     let mut unapplied = Vec::new();
     let root = &ctx.repo.main_worktree;
     for dir in root.ancestors() {
         let dot_cargo = dir.join(".cargo");
-        if cargo_home.is_some() && fs::canonicalize(&dot_cargo).ok() == cargo_home {
+        if cargo_home.is_some() && crate::sys::canonicalize(&dot_cargo).ok() == cargo_home {
             continue;
         }
         for file in ["config", "config.toml"] {
@@ -961,6 +964,42 @@ struct WarmOutcome {
     warnings: Vec<String>,
 }
 
+/// The command that runs the warm command `line`, and its program's name.
+/// `sh -c` on Unix. Windows has no `sh` of its own: a line made only of
+/// words and quotes, as the generated ones are, runs directly; any other
+/// line runs with Git for Windows' `sh` when it is on `PATH`, else with
+/// `cmd /C`.
+fn shell_command(line: &str) -> (Command, String) {
+    #[cfg(windows)]
+    if let Some(argv) = crate::config::split_words(line)
+        && let Some((program, args)) = argv.split_first()
+    {
+        let mut command = Command::new(program);
+        command.args(args);
+        return (command, program.clone());
+    }
+    let sh = if cfg!(windows) {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path).any(|d| d.join("sh.exe").is_file())
+    } else {
+        true
+    };
+    if sh {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(line);
+        (command, "sh".into())
+    } else {
+        let mut command = Command::new("cmd");
+        command.arg("/C");
+        // cmd.exe does its own parsing of the rest of its command line.
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::raw_arg(&mut command, line);
+        #[cfg(unix)]
+        command.arg(line);
+        (command, "cmd".into())
+    }
+}
+
 fn run_warm_commands(
     plan: &Plan,
     env: &[(OsString, OsString)],
@@ -975,24 +1014,21 @@ fn run_warm_commands(
         fsutil::note(&format!("running `{line}`"));
         // Build output goes to stderr so `--json` output on stdout stays
         // parseable.
-        let stderr = std::io::stderr()
-            .as_fd()
-            .try_clone_to_owned()
-            .at("duplicate", "stderr")?;
+        #[cfg(unix)]
+        let stderr = std::io::stderr().as_fd().try_clone_to_owned();
+        #[cfg(windows)]
+        let stderr = std::io::stderr().as_handle().try_clone_to_owned();
+        let stderr = stderr.at("duplicate", "stderr")?;
         let started = Instant::now();
-        let status = Command::new("sh")
-            .arg("-c")
-            .arg(line)
+        let (mut command, program) = shell_command(line);
+        let status = command
             .current_dir(plan.build_src())
             .env("PWD", plan.build_src())
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::from(stderr))
             .status()
-            .map_err(|source| sandbox::SandboxError::Exec {
-                program: "sh".into(),
-                source,
-            })?;
+            .map_err(|source| sandbox::SandboxError::Exec { program, source })?;
         outcome.secs.push(started.elapsed().as_secs_f64());
         if status.success() {
             continue;
