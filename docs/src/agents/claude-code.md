@@ -86,9 +86,13 @@ Progress goes to stderr.
 - The branch is `ferry/<name>` and starts at `HEAD` of the checkout Claude was
   started from. Claude's `worktree.baseRef` setting does not apply, because the
   hook replaces Claude's own worktree creation.
-- The hook never builds a base. Without one it fails with
-  `no warm base exists for this repository`, and Claude reports that the
-  worktree could not be created.
+- The hook never builds a base. In a repository without one (not a Rust
+  project, or `ferry base` never run there), it creates the worktree Claude
+  would have created itself: `.claude/worktrees/<name>` on branch
+  `worktree-<name>`, with no fork. So the hooks can be configured globally
+  without breaking `claude --worktree` in other projects.
+  `claude-worktree-remove` removes such a worktree with `git worktree remove`,
+  which refuses when it has uncommitted changes.
 - Claude Code does not process `.worktreeinclude` when a `WorktreeCreate` hook
   is configured, and Ferry does not copy those files either. The only file
   Ferry adds to a new worktree is the base's `Cargo.lock`, when the repository

@@ -263,6 +263,43 @@ fn distinct_claude_worktree_names_get_distinct_agents() {
     assert_ne!(first, second, "two Claude worktrees share {first}");
 }
 
+/// HIGH: with the hooks configured globally, `claude --worktree` failed in
+/// every repository without a base. It must fall back to a plain worktree,
+/// and the remove hook must clean that up.
+#[test]
+fn claude_hooks_fall_back_to_plain_worktree_without_base() {
+    let repo = TestRepo::new();
+    let hook = |event: &str, input: serde_json::Value| {
+        let mut cmd = repo.ferry_cmd(["hook", event]);
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        std::io::Write::write_all(
+            &mut child.stdin.take().unwrap(),
+            input.to_string().as_bytes(),
+        )
+        .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{event} failed");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    let path = hook(
+        "claude-worktree-create",
+        serde_json::json!({ "cwd": repo.root(), "name": "plain" }),
+    );
+    let path = PathBuf::from(path);
+    assert!(
+        path.join(".git").exists(),
+        "no worktree at {}",
+        path.display()
+    );
+    hook(
+        "claude-worktree-remove",
+        serde_json::json!({ "cwd": repo.root(), "worktree_path": path }),
+    );
+    assert!(!path.exists(), "worktree left at {}", path.display());
+}
+
 /// MEDIUM: every fresh `ferry base` (via `discard`), every `gc` and `rm` of
 /// an agent with a missing worktree run a repository-wide `git worktree
 /// prune`, which deletes the admin dir (index, HEAD, per-worktree refs) of
