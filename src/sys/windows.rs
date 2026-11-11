@@ -395,3 +395,110 @@ pub fn windows_version() -> String {
         format!("Windows {build}")
     }
 }
+
+/// `DeviceIoControl` with an input struct and no output.
+fn fsctl_in<T>(file: &File, code: u32, input: &T) -> io::Result<()> {
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    let mut returned = 0u32;
+    // SAFETY: the handle is open; `input` is a valid `T` of the size passed,
+    // and no output buffer or overlapped I/O is used.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle(file),
+            code,
+            std::ptr::from_ref(input).cast::<c_void>(),
+            len32(size_of::<T>()),
+            std::ptr::null_mut(),
+            0,
+            &raw mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `DeviceIoControl` with no input and an output struct.
+fn fsctl_out<T: Default>(file: &File, code: u32) -> io::Result<T> {
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    let mut out = T::default();
+    let mut returned = 0u32;
+    // SAFETY: the handle is open; `out` is writable for the size passed.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle(file),
+            code,
+            std::ptr::null(),
+            0,
+            (&raw mut out).cast::<c_void>(),
+            len32(size_of::<T>()),
+            &raw mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(out)
+}
+
+/// Creates `dst` sharing all of `src`'s clusters: `ReFS` block cloning
+/// (`FSCTL_DUPLICATE_EXTENTS_TO_FILE`), as on a Dev Drive. Both must be on
+/// the same `ReFS` volume. Never falls back to copying; on failure `dst` is
+/// removed.
+pub fn clone_file(src: &Path, dst: &Path) -> io::Result<()> {
+    let from = File::open(src)?;
+    let to = OpenOptions::new().write(true).create_new(true).open(dst)?;
+    let result = clone_into(&from, &to);
+    if result.is_err() {
+        drop(to);
+        let _ = std::fs::remove_file(dst);
+    }
+    result
+}
+
+fn clone_into(from: &File, to: &File) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SPARSE_FILE;
+    use windows_sys::Win32::System::Ioctl::{
+        DUPLICATE_EXTENTS_DATA, FSCTL_DUPLICATE_EXTENTS_TO_FILE, FSCTL_GET_INTEGRITY_INFORMATION,
+        FSCTL_GET_INTEGRITY_INFORMATION_BUFFER, FSCTL_SET_INTEGRITY_INFORMATION,
+        FSCTL_SET_INTEGRITY_INFORMATION_BUFFER, FSCTL_SET_SPARSE,
+    };
+    // Cloning needs both files to agree on integrity streams and sparseness.
+    let integrity: FSCTL_GET_INTEGRITY_INFORMATION_BUFFER =
+        fsctl_out(from, FSCTL_GET_INTEGRITY_INFORMATION)?;
+    if integrity.ChecksumAlgorithm != 0 {
+        let set = FSCTL_SET_INTEGRITY_INFORMATION_BUFFER {
+            ChecksumAlgorithm: integrity.ChecksumAlgorithm,
+            Reserved: 0,
+            Flags: integrity.Flags,
+        };
+        fsctl_in(to, FSCTL_SET_INTEGRITY_INFORMATION, &set)?;
+    }
+    let meta = from.metadata()?;
+    if meta.file_attributes() & FILE_ATTRIBUTE_SPARSE_FILE != 0 {
+        fsctl_in(to, FSCTL_SET_SPARSE, &1u8)?;
+    }
+    let len = meta.len();
+    to.set_len(len)?;
+    // Regions must be whole clusters; the last one may run past the end of
+    // the file. One call clones less than 4 GiB.
+    let cluster = u64::from(integrity.ClusterSizeInBytes).max(512);
+    let total = len.div_ceil(cluster) * cluster;
+    let step = (1u64 << 31) / cluster * cluster;
+    let mut offset = 0;
+    while offset < total {
+        let count = step.min(total - offset);
+        let data = DUPLICATE_EXTENTS_DATA {
+            FileHandle: handle(from),
+            SourceFileOffset: offset.cast_signed(),
+            TargetFileOffset: offset.cast_signed(),
+            ByteCount: count.cast_signed(),
+        };
+        fsctl_in(to, FSCTL_DUPLICATE_EXTENTS_TO_FILE, &data)?;
+        offset += count;
+    }
+    Ok(())
+}

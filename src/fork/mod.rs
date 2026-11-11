@@ -25,6 +25,8 @@ mod copy;
 mod overlay;
 #[cfg(target_os = "linux")]
 pub(crate) mod reflink;
+#[cfg(windows)]
+mod refs;
 pub(crate) mod tree;
 
 #[derive(Debug, thiserror::Error)]
@@ -135,6 +137,8 @@ pub fn backend(kind: BackendKind) -> Result<Box<dyn Backend>, ForkError> {
         BackendKind::Reflink => Ok(Box::new(reflink::Reflink)),
         #[cfg(target_os = "macos")]
         BackendKind::Reflink => Ok(Box::new(clonefile::Clonefile)),
+        #[cfg(windows)]
+        BackendKind::Reflink => Ok(Box::new(refs::Refs)),
         #[cfg(target_os = "linux")]
         BackendKind::Overlay => Ok(Box::new(overlay::Overlay)),
         #[allow(unreachable_patterns)]

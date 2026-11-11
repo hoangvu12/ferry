@@ -143,21 +143,17 @@ pub fn exclude_from_backups(path: &Path) -> std::io::Result<()> {
 /// Tries a copy-on-write clone between two scratch files in `dir`, using the
 /// same call the reflink backend uses.
 pub fn probe_reflink(dir: &Path) -> Probe {
-    if cfg!(windows) {
-        return Probe::Unsupported {
-            reason: "copy-on-write clones are not implemented on Windows yet".into(),
-        };
-    }
     let scratch = dir.join(format!(".ferry-reflink-probe-{}", std::process::id()));
     let result = (|| {
         std::fs::create_dir_all(&scratch).map_err(|e| ("create scratch dir", e))?;
-        #[cfg_attr(windows, allow(unused_variables))]
         let (src, dst) = (scratch.join("src"), scratch.join("dst"));
         std::fs::write(&src, b"ferry reflink probe").map_err(|e| ("write", e))?;
         #[cfg(target_os = "linux")]
         crate::fork::reflink::clone_file(&src, &dst).map_err(|e| ("FICLONE", e))?;
         #[cfg(target_os = "macos")]
         crate::fork::clonefile::clone_file(&src, &dst).map_err(|e| ("clonefile", e))?;
+        #[cfg(windows)]
+        crate::sys::clone_file(&src, &dst).map_err(|e| ("FSCTL_DUPLICATE_EXTENTS_TO_FILE", e))?;
         Ok::<(), (&str, std::io::Error)>(())
     })();
     let _ = std::fs::remove_dir_all(&scratch);

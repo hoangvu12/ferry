@@ -292,4 +292,4 @@ pub fn is_program(name: &std::ffi::OsStr, stem: &str) -> bool {
 }
 
 #[cfg(windows)]
-pub use self::windows::{agent_job_pids, fs_name, join_agent_job, windows_version};
+pub use self::windows::{agent_job_pids, clone_file, fs_name, join_agent_job, windows_version};

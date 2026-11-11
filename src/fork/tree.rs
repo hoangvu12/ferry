@@ -180,7 +180,6 @@ fn copy_contents(src: &Path, dst: &Path) -> io::Result<()> {
 /// Bytes of files under `agent` that no longer share data with the file at
 /// the same path under `base` (rewritten, new, or changed size or mtime).
 /// Clones that were never written keep the base's size and mtime.
-#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn private_bytes_vs_base(agent: &Path, base: &Path) -> Result<u64, ForkError> {
     let mut total = 0;
     let mut stack = vec![agent.to_path_buf()];
